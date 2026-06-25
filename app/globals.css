@@ -1,0 +1,182 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Theme: Dark (default) ──────────────────────────────────────────────── */
+
+:root,
+html.dark {
+  --surface-950: oklch(12% 0.015 190);
+  --surface-900: oklch(16% 0.018 190);
+  --surface-800: oklch(20% 0.020 190);
+  --surface-700: oklch(26% 0.018 190);
+
+  --accent:        oklch(72% 0.14 185);
+  --accent-dim:    oklch(62% 0.12 185);
+  --accent-subtle: oklch(72% 0.14 185 / 0.12);
+  --accent-border: oklch(72% 0.14 185 / 0.30);
+
+  --data-positive: oklch(75% 0.17 145);
+  --data-negative: oklch(60% 0.20 25);
+  --data-flag:     oklch(72% 0.16 70);
+  --data-neutral:  oklch(65% 0.08 220);
+
+  --text-primary:   oklch(92% 0.008 200);
+  --text-secondary: oklch(60% 0.015 220);
+  --text-muted:     oklch(42% 0.012 220);
+  --text-label:     oklch(52% 0.014 220);
+
+  --border:        oklch(26% 0.018 190 / 0.70);
+  --border-subtle: oklch(26% 0.018 190 / 0.35);
+
+  /* Motion */
+  --ease-out-quint:     cubic-bezier(0.22, 1, 0.36, 1);
+  --duration-micro:     120ms;
+  --duration-standard:  240ms;
+  --duration-elaborate: 400ms;
+}
+
+/* ── Theme: Light ───────────────────────────────────────────────────────── */
+
+html.light {
+  --surface-950: oklch(96% 0.006 190);
+  --surface-900: oklch(99% 0.004 190);
+  --surface-800: oklch(100% 0.003 190);
+  --surface-700: oklch(93% 0.008 190);
+
+  --accent:        oklch(58% 0.14 185);
+  --accent-dim:    oklch(48% 0.12 185);
+  --accent-subtle: oklch(58% 0.14 185 / 0.10);
+  --accent-border: oklch(58% 0.14 185 / 0.25);
+
+  --data-positive: oklch(52% 0.17 145);
+  --data-negative: oklch(48% 0.20 25);
+  --data-flag:     oklch(52% 0.16 70);
+  --data-neutral:  oklch(48% 0.08 220);
+
+  --text-primary:   oklch(14% 0.015 200);
+  --text-secondary: oklch(40% 0.015 220);
+  --text-muted:     oklch(58% 0.012 220);
+  --text-label:     oklch(50% 0.014 220);
+
+  --border:        oklch(86% 0.008 200);
+  --border-subtle: oklch(92% 0.006 200);
+}
+
+/* ── Base ───────────────────────────────────────────────────────────────── */
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--surface-950);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+html.dark body {
+  background-image:
+    radial-gradient(ellipse at 20% 50%, oklch(72% 0.14 185 / 0.03) 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 20%, oklch(72% 0.14 185 / 0.02) 0%, transparent 50%);
+}
+
+html.light body {
+  background-image:
+    radial-gradient(ellipse at 20% 50%, oklch(58% 0.14 185 / 0.04) 0%, transparent 60%);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--surface-900); }
+::-webkit-scrollbar-thumb { background: var(--surface-800); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent-border); }
+
+::selection { background: oklch(72% 0.14 185 / 0.25); color: var(--text-primary); }
+
+/* ── Typography ─────────────────────────────────────────────────────────── */
+
+.font-display { font-family: var(--font-display); }
+.font-body    { font-family: var(--font-body);    }
+.font-mono    { font-family: var(--font-mono);    }
+
+/* ── Panels / cards ─────────────────────────────────────────────────────── */
+
+.panel {
+  background: var(--surface-900);
+  border: 1px solid var(--border-subtle);
+  border-radius: 2px;
+}
+
+html.dark .panel {
+  box-shadow: 0 4px 24px oklch(0% 0 0 / 0.4);
+}
+
+html.light .panel {
+  box-shadow: 0 4px 12px oklch(14% 0.015 200 / 0.08), 0 2px 4px oklch(14% 0.015 200 / 0.04);
+}
+
+.card {
+  background: var(--surface-800);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+}
+
+/* ── Data display ───────────────────────────────────────────────────────── */
+
+.data-value {
+  font-family: var(--font-mono);
+  font-feature-settings: 'tnum' 1;
+  letter-spacing: -0.01em;
+}
+
+.accent-line {
+  height: 1px;
+  background: linear-gradient(
+    90deg, transparent,
+    var(--accent-border) 20%,
+    var(--accent-border) 80%,
+    transparent
+  );
+}
+
+/* ── Field source indicators ────────────────────────────────────────────── */
+
+.indicator-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.indicator-extracted { background: var(--accent); }
+.indicator-derived   { background: var(--data-neutral); }
+.indicator-missing   { background: var(--data-flag); }
+.indicator-manual    { background: var(--border); }
+
+/* ── Scope disclaimer banner ────────────────────────────────────────────── */
+
+.scope-banner {
+  background: oklch(72% 0.16 70 / 0.06);
+  border: 1px solid oklch(72% 0.16 70 / 0.20);
+  border-radius: 4px;
+}
+
+/* ── Shimmer ────────────────────────────────────────────────────────────── */
+
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position:  200% center; }
+}
+
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--surface-800) 25%,
+    var(--surface-700) 50%,
+    var(--surface-800) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
