@@ -42,6 +42,7 @@ function normalizeConfig(raw) {
     callCurve: c.callCurve === 'history-fit' ? 'history-fit' : 'front-loaded',
     callDecay: isNum(c.callDecay) ? c.callDecay : 0.7,
     forwardValueMultiple: isNum(c.forwardValueMultiple) ? c.forwardValueMultiple : 1.6,
+    forwardCallMultiple: isNum(c.forwardCallMultiple) ? c.forwardCallMultiple : 1.4,
     avgRemainingHoldYears: isNum(c.avgRemainingHoldYears) ? c.avgRemainingHoldYears : 5,
     overrides: Array.isArray(c.overrides) ? c.overrides : [],
   }

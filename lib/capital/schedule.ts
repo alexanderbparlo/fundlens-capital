@@ -10,7 +10,10 @@ import { projectDistributions } from './distributionPacing'
 
 // Bump when the projection math changes — persisted alongside each run snapshot so
 // projections can be diffed across builds (handoff §11).
-export const ENGINE_VERSION = '1.0.0'
+// 1.1.0 — remediation round 1: outstanding-capital preferred accrual (carry now binds),
+//   raised-cosine peak-and-taper distribution curve, forward multiple on called capital,
+//   forward-only peak funding need.
+export const ENGINE_VERSION = '1.1.0'
 
 const EPSILON = 1e-6
 
@@ -74,15 +77,20 @@ export function buildSchedule(fields: ConfirmedFields, config: PacingConfig): Ca
   const totalProjectedCalls = periods.reduce((s, p) => s + p.call, 0)
   const totalProjectedDistributions = periods.reduce((s, p) => s + p.distribution, 0)
 
-  // Trough = deepest cumulative net position. The opening position itself can be
-  // the deepest point if the LP is already net-negative and distributions outpace
-  // calls from the first quarter.
+  // Trough = deepest LIFETIME cumulative net position (opens at the already-funded
+  // position). The opening position itself can be the deepest point if the LP is already
+  // net-negative and distributions outpace calls from the first quarter. This drives the
+  // J-curve trough marker — it is NOT the forward funding need. The marquee "peak funding
+  // need" is computed from a forward-only series in buildLiquidityView; the two read off
+  // different series by design (peak funding need = forward; crossover = lifetime).
   let trough: { date: string; value: number } = { date: fields.asOfDate, value: openingNet }
   for (const p of periods) {
     if (p.cumulativeNet < trough.value) trough = { date: p.date, value: p.cumulativeNet }
   }
 
-  // Crossover = first quarter the LP turns net-positive.
+  // Crossover = first quarter the LP turns net-positive on the LIFETIME series — the
+  // legitimate DPI = 1.0 "got my money back" breakeven. Stays on lifetime cumulative net
+  // (do not move it to the forward series that peak funding need uses).
   const crossPeriod = periods.find(p => p.cumulativeNet >= -EPSILON)
   const crossover = crossPeriod ? { date: crossPeriod.date } : null
 

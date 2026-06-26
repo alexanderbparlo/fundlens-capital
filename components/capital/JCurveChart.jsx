@@ -35,8 +35,13 @@ export function JCurveChart({ schedule, currency }) {
       </div>
       <p className="font-body text-data-sm text-text-muted mb-4">Net position over time, opening from capital called and distributions received to date.</p>
 
-      <ResponsiveContainer width="100%" height={280}>
-        <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 8 }}>
+      {/* Constrained toward a ~1:1 aspect so the J-curve's curvature reads naturally
+          instead of being flattened across a wide container. Recharts scales the Y
+          domain to the data independently of pixel size, so the aspect change does not
+          distort axis scaling. */}
+      <div className="mx-auto w-full max-w-[480px]">
+      <ResponsiveContainer width="100%" aspect={1.1} minHeight={300}>
+        <AreaChart data={data} margin={{ top: 12, right: 8, bottom: 0, left: 8 }}>
           <defs>
             <linearGradient id="jcurveFill" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.18} />
@@ -44,7 +49,7 @@ export function JCurveChart({ schedule, currency }) {
             </linearGradient>
           </defs>
           <XAxis dataKey="label" tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' }} interval="preserveStartEnd" minTickGap={40} axisLine={{ stroke: 'var(--border-subtle)' }} tickLine={false} />
-          <YAxis tickFormatter={v => formatCurrency(v, currency)} tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' }} width={60} axisLine={false} tickLine={false} />
+          <YAxis tickFormatter={v => formatCurrency(v, currency)} tick={{ fontSize: 10, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' }} width={60} axisLine={false} tickLine={false} padding={{ top: 8, bottom: 8 }} />
           <Tooltip content={<CustomTooltip currency={currency} />} />
           <ReferenceLine y={0} stroke="var(--border)" strokeDasharray="3 3" />
           <Area type="monotone" dataKey="cumulativeNet" stroke="var(--accent)" strokeWidth={2} fill="url(#jcurveFill)" animationDuration={700} dot={false} />
@@ -52,6 +57,7 @@ export function JCurveChart({ schedule, currency }) {
           {crossoverPoint && <ReferenceDot x={crossoverPoint.label} y={crossoverPoint.cumulativeNet} r={4} fill="var(--data-positive)" stroke="none" />}
         </AreaChart>
       </ResponsiveContainer>
+      </div>
     </div>
   )
 }

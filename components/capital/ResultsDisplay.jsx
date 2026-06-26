@@ -48,6 +48,17 @@ function ShareButton({ runId }) {
 export function ResultsDisplay({ fields, schedule, liquidity, narrative, isGeneratingNarrative, runId, onOverride, onBack, onReset }) {
   const currency = fields?.currency ?? 'USD'
 
+  // Carry actually deducted by the European waterfall on this run. The "net of carry"
+  // label is only truthful when carry binds — it binds once lifetime value clears
+  // return of capital + the preferred return. When it doesn't, distributions equal
+  // gross and we say so rather than asserting a deduction that did not happen.
+  const breakdown = schedule?.distributionBreakdown ?? {}
+  const gpCarryProjected = (breakdown.gpCatchUp ?? 0) + (breakdown.gpProfitSplit ?? 0)
+  const carryBinds = gpCarryProjected > 0
+  const distributionsSub = carryBinds
+    ? `net of ${formatCurrency(gpCarryProjected, currency)} carry`
+    : 'no carry — preferred not cleared'
+
   return (
     <div className="w-full max-w-results mx-auto">
       {/* Header */}
@@ -73,7 +84,7 @@ export function ResultsDisplay({ fields, schedule, liquidity, narrative, isGener
         />
         <Metric label="J-curve crossover" value={schedule.crossover ? quarterOf(schedule.crossover.date) : '—'} sub={schedule.crossover ? 'turns net-positive' : 'not within fund life'} tone="text-data-positive" />
         <Metric label="Projected calls" value={formatCurrency(schedule.totalProjectedCalls, currency)} sub="remaining unfunded" tone="text-data-negative" />
-        <Metric label="Projected distributions" value={formatCurrency(schedule.totalProjectedDistributions, currency)} sub="net of carry" tone="text-data-positive" />
+        <Metric label="Projected distributions" value={formatCurrency(schedule.totalProjectedDistributions, currency)} sub={distributionsSub} tone="text-data-positive" />
       </div>
 
       <div className="space-y-6">

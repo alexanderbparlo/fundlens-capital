@@ -33,7 +33,7 @@ export function LiquidityView({ liquidity, currency }) {
         <div className="scope-banner px-4 py-3 mb-6 flex items-baseline gap-2">
           <span className="font-body text-data-sm text-text-secondary">Peak funding need</span>
           <span className="data-value text-data-sm text-data-flag">{formatCurrency(liquidity.peakFundingNeed.value, currency)}</span>
-          <span className="font-body text-data-sm text-text-muted">— deepest net position, the most this LP is ever in the hole net of returns.</span>
+          <span className="font-body text-data-sm text-text-muted">— forward dry powder to keep on hand from the as-of date; prior calls treated as done, bounded by remaining unfunded.</span>
         </div>
       )}
 

@@ -1,4 +1,5 @@
 import type { FundTerms, WaterfallResult } from '@/lib/capital/scheduleTypes'
+import { yearsBetween } from '@/lib/capital/dates'
 
 // Inputs for the LP-level waterfall split. This is a clean reimplementation of the
 // DesoFall tier semantics (ROC → preferred → GP catch-up → carry split), modeled as
@@ -11,17 +12,78 @@ import type { FundTerms, WaterfallResult } from '@/lib/capital/scheduleTypes'
 // only bites once the LP has been made whole on capital + preferred across the whole
 // fund — the defining property of a European waterfall.
 export interface WaterfallTerms extends FundTerms {
-  paidIn: number    // LP contributed capital (the return-of-capital basis)
-  prefYears: number // years over which the preferred return accrues
+  paidIn: number        // LP contributed capital (the return-of-capital basis)
+  preferredOwed: number // cumulative preferred-return entitlement (see preferredReturnOutstanding)
 }
 
-// Cumulative preferred return owed on the LP's paid-in capital.
-function preferredReturnAmount(terms: WaterfallTerms): number {
-  const { paidIn, hurdleRate, prefYears, preferredCompounding } = terms
-  if (paidIn <= 0 || prefYears <= 0 || hurdleRate <= 0) return 0
-  return preferredCompounding === 'compound'
-    ? paidIn * (Math.pow(1 + hurdleRate, prefYears) - 1)
-    : paidIn * hurdleRate * prefYears
+// A dated capital event for the preferred-return accrual.
+// amount > 0 = contribution (capital called); amount < 0 = distribution (credited).
+export interface PreferredEvent {
+  date: string
+  amount: number
+}
+
+// Cumulative preferred-return entitlement on an OUTSTANDING-CAPITAL basis.
+//
+// The preferred return accrues on the LP's *unreturned* capital, not on a flat
+// lump of total paid-in. We walk the dated contribution/distribution history,
+// compounding (or simple-accruing) the hurdle between events, and crediting each
+// distribution against the outstanding balance so it stops accruing preferred on
+// capital that has already been returned. The remaining capital then continues to
+// accrue through `endDate` (the projected final distribution at fund end).
+//
+// This corrects the prior over-accrual that compounded the *entire* paid-in from
+// vintage to fund end as though all capital were contributed at inception — which
+// inflated the hurdle so far that carry could never bind even on a real profit.
+//
+//   compound: the hurdle compounds on (unreturned capital + unpaid preferred);
+//             distributions pay down accrued preferred first, then capital.
+//   simple:   the hurdle accrues linearly on unreturned capital only;
+//             distributions return capital.
+export function preferredReturnOutstanding(
+  events: PreferredEvent[],
+  hurdleRate: number,
+  compounding: FundTerms['preferredCompounding'],
+  startDate: string,
+  endDate: string
+): number {
+  if (hurdleRate <= 0) return 0
+
+  const ordered = [...events]
+    .filter(e => Number.isFinite(e.amount) && e.amount !== 0 && Boolean(e.date))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+
+  let capital = 0   // unreturned contributed capital
+  let accrued = 0   // accrued, unpaid preferred return
+  let last = startDate
+
+  const grow = (base: number, dt: number): number =>
+    compounding === 'compound'
+      ? base * (Math.pow(1 + hurdleRate, dt) - 1)
+      : base * hurdleRate * dt
+
+  for (const e of ordered) {
+    const dt = Math.max(0, yearsBetween(last, e.date))
+    accrued += grow(compounding === 'compound' ? capital + accrued : capital, dt)
+
+    if (e.amount > 0) {
+      capital += e.amount // contribution
+    } else {
+      let credit = -e.amount // distribution magnitude
+      if (compounding === 'compound') {
+        const payPref = Math.min(accrued, credit)
+        accrued -= payPref
+        credit -= payPref
+      }
+      capital = Math.max(0, capital - credit)
+    }
+    last = e.date
+  }
+
+  const tail = Math.max(0, yearsBetween(last, endDate))
+  accrued += grow(compounding === 'compound' ? capital + accrued : capital, tail)
+
+  return Math.max(0, accrued)
 }
 
 export function splitProceeds(grossProceeds: number, terms: WaterfallTerms): WaterfallResult {
@@ -39,8 +101,8 @@ export function splitProceeds(grossProceeds: number, terms: WaterfallTerms): Wat
   breakdown.returnOfCapital = Math.min(remaining, Math.max(0, terms.paidIn))
   remaining -= breakdown.returnOfCapital
 
-  // Tier 2 — Preferred return (to the LP).
-  const pref = preferredReturnAmount(terms)
+  // Tier 2 — Preferred return (to the LP). Precomputed on an outstanding-capital basis.
+  const pref = Math.max(0, terms.preferredOwed)
   breakdown.preferredReturn = Math.min(remaining, pref)
   remaining -= breakdown.preferredReturn
 
@@ -71,5 +133,3 @@ export function splitProceeds(grossProceeds: number, terms: WaterfallTerms): Wat
 
   return { lpNet, gpCarry, breakdown }
 }
-
-export { preferredReturnAmount }

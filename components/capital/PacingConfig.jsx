@@ -48,7 +48,9 @@ function NumberField({ label, hint, value, onChange, step = 0.1, min, max, suffi
 export function PacingConfig({ fields, initialConfig, onRun, onBack }) {
   const [config, setConfig] = useState(initialConfig)
   const hasHistory = (fields?.historicalCalls?.length ?? 0) > 0
-  const projectedGross = Math.max(0, fields?.currentNav ?? 0) * (Number(config.forwardValueMultiple) || 0)
+  const navGross = Math.max(0, fields?.currentNav ?? 0) * (Number(config.forwardValueMultiple) || 0)
+  const calledGross = Math.max(0, fields?.unfundedCommitment ?? 0) * (Number(config.forwardCallMultiple) || 0)
+  const projectedGross = navGross + calledGross
 
   const set = (key, value) => setConfig(prev => ({ ...prev, [key]: value }))
 
@@ -106,8 +108,17 @@ export function PacingConfig({ fields, initialConfig, onRun, onBack }) {
               suffix="x"
             />
             <NumberField
+              label="Forward multiple on called capital"
+              hint="Total value the future-called (unfunded) capital returns. Defaulted below the NAV multiple — late-deployed capital has less time to mature. Set to 0 to exclude future calls from the distribution base."
+              value={config.forwardCallMultiple}
+              onChange={v => set('forwardCallMultiple', v)}
+              step={0.1}
+              min={0}
+              suffix="x"
+            />
+            <NumberField
               label="Avg remaining hold"
-              hint="Positions the J-curve peak — when exits are assumed to cluster."
+              hint="Positions the J-curve peak — when exits are assumed to cluster, then taper toward fund end."
               value={config.avgRemainingHoldYears}
               onChange={v => set('avgRemainingHoldYears', v)}
               step={0.5}
@@ -116,8 +127,11 @@ export function PacingConfig({ fields, initialConfig, onRun, onBack }) {
             />
           </div>
           <div className="card px-4 py-3 mt-5 inline-flex items-baseline gap-2">
-            <span className="font-body text-data-sm text-text-muted">Projected gross from NAV:</span>
+            <span className="font-body text-data-sm text-text-muted">Projected gross:</span>
             <span className="data-value text-data-sm text-text-primary">{formatCurrency(projectedGross, fields?.currency)}</span>
+            <span className="font-body text-data-sm text-text-muted">
+              NAV {formatCurrency(navGross, fields?.currency)} + called {formatCurrency(calledGross, fields?.currency)}
+            </span>
           </div>
         </div>
       </div>

@@ -1,18 +1,22 @@
 import { describe, it, expect } from 'vitest'
-import { splitProceeds, preferredReturnAmount, type WaterfallTerms } from '../splitProceeds'
+import {
+  splitProceeds,
+  preferredReturnOutstanding,
+  type WaterfallTerms,
+} from '../splitProceeds'
 
 const base: WaterfallTerms = {
   hurdleRate: 0.08,
   carryRate: 0.2,
   catchUp: 'full',
-  preferredCompounding: 'simple',
+  preferredCompounding: 'compound',
   paidIn: 10_000_000,
-  prefYears: 5,
+  preferredOwed: 4_000_000, // hand-set for the tier-split fixtures below
 }
 
 describe('splitProceeds — European whole-fund waterfall', () => {
   it('splits all four tiers with a self-consistent 100% catch-up', () => {
-    // Hand-computed: paidIn 10M, simple pref 8% × 5y = 4M, gross 20M, carry 20%.
+    // Hand-computed: paidIn 10M, preferred 4M, gross 20M, carry 20%.
     //   ROC      = 10M            (remaining 10M)
     //   Pref     = 4M             (remaining 6M)
     //   CatchUp  = 4M × .2/.8 = 1M (remaining 5M)
@@ -65,10 +69,60 @@ describe('splitProceeds — European whole-fund waterfall', () => {
     expect(r.gpCarry).toBe(0)
     expect(r.lpNet).toBeCloseTo(20_000_000, 2)
   })
+})
 
-  it('compounds the preferred return when configured', () => {
-    // 10M × (1.08^5 − 1) = 10M × 0.469328 = 4,693,280.76
-    const pref = preferredReturnAmount({ ...base, preferredCompounding: 'compound' })
-    expect(pref).toBeCloseTo(4_693_280.76, 1)
+describe('preferredReturnOutstanding — outstanding-capital accrual', () => {
+  it('compounds the hurdle on a single contribution held to the horizon', () => {
+    // 10M contributed at t0, no distributions, compounded 8% to the horizon.
+    // yearsBetween uses 365.25-day years, so 2021-01-01 → 2026-01-01 is 4.998y:
+    // 10M × (1.08^4.998 − 1) = 4,692,506.79
+    const pref = preferredReturnOutstanding(
+      [{ date: '2021-01-01', amount: 10_000_000 }],
+      0.08,
+      'compound',
+      '2021-01-01',
+      '2026-01-01'
+    )
+    expect(pref).toBeCloseTo(4_692_506.79, 0)
+  })
+
+  it('credits distributions against outstanding capital, lowering accrued preferred', () => {
+    // Same 10M, but a 5M distribution at year 2.5 returns capital, so the back half
+    // accrues on a smaller base → less preferred than the no-distribution case.
+    const withDist = preferredReturnOutstanding(
+      [
+        { date: '2021-01-01', amount: 10_000_000 },
+        { date: '2023-07-01', amount: -5_000_000 },
+      ],
+      0.08,
+      'compound',
+      '2021-01-01',
+      '2026-01-01'
+    )
+    expect(withDist).toBeGreaterThan(0)
+    expect(withDist).toBeLessThan(4_693_280.76)
+  })
+
+  it('accrues simple interest on unreturned capital only', () => {
+    // Simple 8% on 10M for 4.998y = 3,999,452, unaffected by interest-on-interest.
+    const pref = preferredReturnOutstanding(
+      [{ date: '2021-01-01', amount: 10_000_000 }],
+      0.08,
+      'simple',
+      '2021-01-01',
+      '2026-01-01'
+    )
+    expect(pref).toBeCloseTo(3_999_452.43, 0)
+  })
+
+  it('returns zero when the hurdle is zero', () => {
+    const pref = preferredReturnOutstanding(
+      [{ date: '2021-01-01', amount: 10_000_000 }],
+      0,
+      'compound',
+      '2021-01-01',
+      '2026-01-01'
+    )
+    expect(pref).toBe(0)
   })
 })

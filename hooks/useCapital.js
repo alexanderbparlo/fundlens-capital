@@ -16,6 +16,7 @@ export const DEFAULT_PACING = {
   callCurve: 'front-loaded',
   callDecay: 0.7,
   forwardValueMultiple: 1.6,
+  forwardCallMultiple: 1.4,
   avgRemainingHoldYears: 5,
   overrides: [],
 }

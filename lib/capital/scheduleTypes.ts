@@ -47,6 +47,7 @@ export interface PacingConfig {
   callCurve: 'front-loaded' | 'history-fit'
   callDecay: number                // geometric decay for front-loaded weights (0,1], default 0.7
   forwardValueMultiple: number     // total-value multiple on current NAV for remaining holdings
+  forwardCallMultiple: number      // total-value multiple on future-called (unfunded) capital; 0 = NAV-only
   avgRemainingHoldYears: number    // avg years until remaining holdings exit — positions the J-curve peak
   overrides: PeriodOverride[]
 }

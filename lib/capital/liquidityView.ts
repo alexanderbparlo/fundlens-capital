@@ -38,12 +38,29 @@ export function buildLiquidityView(
     amount: periods.slice(0, quarters).reduce((sum, p) => sum + p.call, 0),
   }))
 
-  // Peak funding need = the deepest cumulative net position, expressed as a positive
-  // liquidity figure. This is the most the LP is ever "in the hole" net of returns.
+  // Peak funding need = the deepest point of the FORWARD-ONLY cumulative-net series,
+  // which resets to 0 at the as-of date and sums only projected flows (distribution −
+  // call) from the first forward quarter onward. Prior calls are treated as done.
+  //
+  // This is deliberately NOT the lifetime trough (schedule.trough), which opens at the
+  // already-funded, sunk position (distributions-to-date − called-to-date) and so bundles
+  // capital that is already deployed into a number framed as forward treasury planning.
+  // An LP CFO asking "how much dry powder do I keep on hand?" needs the forward figure.
+  // It is bounded by remaining unfunded (calls sum to at most the unfunded commitment)
+  // less any distributions arriving before the trough.
+  //
+  // The J-curve CROSSOVER intentionally stays on the LIFETIME series (see schedule.ts):
+  // crossing zero on lifetime cumulative net is the legitimate DPI = 1.0 breakeven. After
+  // this split the two headline metrics read off different series by design — do not
+  // "correct" one to match the other.
+  let forwardCum = 0
+  let forwardTrough = { date: schedule.asOfDate, value: 0 }
+  for (const p of schedule.periods) {
+    forwardCum += p.netCashFlow
+    if (forwardCum < forwardTrough.value) forwardTrough = { date: p.date, value: forwardCum }
+  }
   const peakFundingNeed =
-    schedule.trough && schedule.trough.value < 0
-      ? { date: schedule.trough.date, value: -schedule.trough.value }
-      : null
+    forwardTrough.value < 0 ? { date: forwardTrough.date, value: -forwardTrough.value } : null
 
   return { openingUnfunded, periods, rollingLiquidityRequired, peakFundingNeed }
 }
