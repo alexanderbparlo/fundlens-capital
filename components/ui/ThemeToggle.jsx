@@ -6,7 +6,10 @@ export function ThemeToggle() {
   const [theme, setTheme] = useState('dark')
 
   useEffect(() => {
+    // Hydration-safe read of an external store: the server renders the
+    // 'dark' default, then the stored preference is applied after mount.
     const stored = localStorage.getItem('capital-theme') || 'dark'
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setTheme(stored)
   }, [])
 
