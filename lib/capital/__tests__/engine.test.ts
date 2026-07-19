@@ -474,17 +474,21 @@ describe('WESTBROOK_R2 — end-to-end regression (Round 2, Item 2 checklist)', (
   })
 
   it('6. sum-preservation to the penny — reshaping leaks nothing', () => {
-    // Total projected gross = (NAV × nav_multiple) + (future_called × call_multiple)
-    //                       = 19.5M × 1.6 + 7M × 1.4 = $41.0M.
+    // Projected future gross = (NAV × nav_multiple) + (future_called × call_multiple)
+    //                        = 19.5M × 1.6 + 7M × 1.4 = $41.0M.
     const expectedFutureGross = 19_500_000 * 1.6 + 7_000_000 * 1.4
     for (const s of [scheduleFL, scheduleHF]) {
       const gpCarry = s.distributionBreakdown.gpCatchUp + s.distributionBreakdown.gpProfitSplit
-      // Lifetime LP-net + GP carry reassembles ITD distributions + projected gross.
-      expect(s.lifetimeLpNet + gpCarry).toBeCloseTo(
-        WESTBROOK_R2.distributionsToDate + expectedFutureGross, 2
-      )
-      // The J-curve reshaping releases exactly the future LP-net, no leakage.
+      // The schedule is LP-net: per-period distributions sum to futureLpNet
+      // (= lifetimeLpNet − distributionsToDate), NOT to the two-term gross —
+      // the gap between the two is exactly the GP's carry.
+      expect(s.futureLpNet).toBeCloseTo(s.lifetimeLpNet - WESTBROOK_R2.distributionsToDate, 2)
       expect(s.totalProjectedDistributions).toBeCloseTo(s.futureLpNet, 2)
+      // Gross-level identity: futureLpNet + gpCarry + distributionsToDate =
+      // (NAV × nav_multiple) + (future_called × call_multiple) + distributionsToDate.
+      expect(s.futureLpNet + gpCarry + WESTBROOK_R2.distributionsToDate).toBeCloseTo(
+        expectedFutureGross + WESTBROOK_R2.distributionsToDate, 2
+      )
       // And the call track deploys exactly the unfunded commitment.
       expect(s.totalProjectedCalls).toBeCloseTo(7_000_000, 2)
     }

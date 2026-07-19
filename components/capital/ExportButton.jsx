@@ -5,7 +5,9 @@ import { Download } from 'lucide-react'
 const COLUMNS = [
   ['quarter', 'Quarter'],
   ['call', 'Projected Call'],
-  ['distribution', 'Projected Distribution'],
+  // Distributions pass through the whole-fund waterfall — the schedule is LP-net,
+  // never gross, so the export says so explicitly.
+  ['distribution', 'LP-net Distribution'],
   ['netCashFlow', 'Net Cash Flow'],
   ['cumulativeCalled', 'Cumulative Called'],
   ['cumulativeDistributed', 'Cumulative Distributed'],
