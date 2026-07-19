@@ -320,6 +320,177 @@ describe('Fix 4 — forward peak funding need vs. lifetime crossover', () => {
   })
 })
 
+// ── Westbrook IV — Round 2 fixture: multi-year remaining investment period ──────
+// Identical to WESTBROOK except the investment period ends 2028-06-01, ~2.2 years
+// past the 2026-03-31 as-of date, so the $7M remaining call no longer collapses into
+// a single quarter. First fixture to drive both call-pacing modes through the full
+// schedule → liquidity → waterfall path. WESTBROOK itself is untouched above — its
+// hand-computed carry expectations must keep passing unchanged.
+const WESTBROOK_R2: ConfirmedFields = {
+  ...WESTBROOK,
+  investmentPeriodEndDate: '2028-06-01',
+}
+
+// Nine forward call quarters, Q2 2026 through the quarter containing IP end.
+const R2_CALL_QUARTERS = [
+  '2026-06-30', '2026-09-30', '2026-12-31', '2027-03-31', '2027-06-30',
+  '2027-09-30', '2027-12-31', '2028-03-31', '2028-06-30',
+]
+
+// Observed deployment pace: $18M called across 11 distinct historical quarters.
+const R2_HIST_AVG = 18_000_000 / 11 // ≈ $1.636M per quarter
+
+describe('WESTBROOK_R2 — front-loaded call pacing over a multi-year IP (Round 2)', () => {
+  const calls = projectCalls(WESTBROOK_R2, CONFIG)
+
+  it('spreads across all nine quarters to IP end — no single-quarter dump', () => {
+    expect(calls.map(c => c.date)).toEqual(R2_CALL_QUARTERS)
+    for (const c of calls) {
+      expect(c.amount).toBeGreaterThan(0)
+      expect(c.amount).toBeLessThan(WESTBROOK_R2.unfundedCommitment)
+    }
+  })
+
+  it('sums to exactly the $7M remaining unfunded', () => {
+    expect(sum(calls.map(c => c.amount))).toBeCloseTo(7_000_000, 2)
+  })
+
+  it('declines geometrically from the largest first quarter at decay 0.7', () => {
+    // First-quarter weight 1 of Σ 0.7^i (i = 0..8): 7M / ((1 − 0.7^9) / 0.3) ≈ $2.188M.
+    expect(calls[0].amount).toBeCloseTo(7_000_000 / ((1 - 0.7 ** 9) / 0.3), 1)
+    for (let i = 1; i < calls.length; i++) {
+      expect(calls[i].amount).toBeLessThan(calls[i - 1].amount)
+      expect(calls[i].amount / calls[i - 1].amount).toBeCloseTo(0.7, 6)
+    }
+  })
+})
+
+describe('WESTBROOK_R2 — history-fit call pacing (Round 2)', () => {
+  const calls = projectCalls(WESTBROOK_R2, { ...CONFIG, callCurve: 'history-fit' })
+
+  it('matches the observed historical average pace while unfunded remains', () => {
+    // $18M over 11 distinct quarters ≈ $1.636M per quarter for the first four quarters.
+    for (let i = 0; i < 4; i++) expect(calls[i].amount).toBeCloseTo(R2_HIST_AVG, 2)
+  })
+
+  it('caps by remaining unfunded, then stops calling', () => {
+    // Unfunded is exhausted mid-schedule: quarter 5 takes the $454,545 remainder
+    // (7M − 4 × avg) and quarters 6–9 call nothing. The end-of-IP residual branch
+    // (pace too slow to finish) is covered by the round-1 history-fit test above.
+    expect(calls[4].amount).toBeCloseTo(7_000_000 - 4 * R2_HIST_AVG, 2)
+    for (let i = 5; i < calls.length; i++) expect(calls[i].amount).toBe(0)
+    let cumulative = 0
+    for (const c of calls) {
+      cumulative += c.amount
+      expect(cumulative).toBeLessThanOrEqual(WESTBROOK_R2.unfundedCommitment + 1e-6)
+    }
+  })
+
+  it('sums to exactly the $7M remaining unfunded', () => {
+    expect(sum(calls.map(c => c.amount))).toBeCloseTo(7_000_000, 2)
+  })
+
+  it('produces a visibly different schedule from front-loaded on the same fixture', () => {
+    const frontLoaded = projectCalls(WESTBROOK_R2, CONFIG)
+    expect(frontLoaded.map(c => c.amount)).not.toEqual(calls.map(c => c.amount))
+    // First quarter: front-loaded ≈ $2.188M vs history-fit ≈ $1.636M.
+    expect(Math.abs(frontLoaded[0].amount - calls[0].amount)).toBeGreaterThan(500_000)
+  })
+})
+
+describe('WESTBROOK_R2 — end-to-end regression (Round 2, Item 2 checklist)', () => {
+  // Round-1 defaults with the call multiple active (1.4 on future-called capital).
+  const R2_CONFIG: PacingConfig = { ...CONFIG, forwardCallMultiple: 1.4 }
+  const scheduleFL = buildSchedule(WESTBROOK_R2, R2_CONFIG)
+  const scheduleHF = buildSchedule(WESTBROOK_R2, { ...R2_CONFIG, callCurve: 'history-fit' })
+  const liqFL = buildLiquidityView(scheduleFL, WESTBROOK_R2)
+  const liqHF = buildLiquidityView(scheduleHF, WESTBROOK_R2)
+
+  it('1. calls spread across multiple quarters in both modes', () => {
+    const callQuarters = (s: typeof scheduleFL) => s.periods.filter(p => p.call > 0)
+    expect(callQuarters(scheduleFL)).toHaveLength(9)
+    expect(callQuarters(scheduleHF)).toHaveLength(5)
+    for (const s of [scheduleFL, scheduleHF]) {
+      expect(Math.max(...s.periods.map(p => p.call))).toBeLessThan(7_000_000)
+    }
+  })
+
+  it('2. distributions rise to a peak positioned by avgRemainingHoldYears, then taper', () => {
+    // Peak index = 4 years × 4 quarters = 16 → 2030-06-30 on the 21-quarter grid.
+    const amounts = scheduleFL.periods.map(p => p.distribution)
+    const peakIdx = amounts.indexOf(Math.max(...amounts))
+    expect(peakIdx).toBe(16)
+    expect(scheduleFL.periods[peakIdx].date).toBe('2030-06-30')
+    expect(peakIdx).toBeLessThan(amounts.length - 1) // final quarter is not the maximum
+    for (let i = 1; i <= peakIdx; i++) expect(amounts[i]).toBeGreaterThan(amounts[i - 1])
+    for (let i = peakIdx + 1; i < amounts.length; i++) {
+      expect(amounts[i]).toBeLessThan(amounts[i - 1])
+    }
+  })
+
+  it('3. distributions are net of carry; carry binds, so the conditional label state is "net of carry"', () => {
+    // Distribution track is independent of call timing, so the hand-computed WESTBROOK
+    // figures at call multiple 1.4 carry over exactly: gross 45.2M, ROC 25M (18M called
+    // + 7M future), profit above ROC 20.2M, pref ≈ 12.67M < 20.2M → full catch-up →
+    // gpCarry = 0.20 × 20.2M = 4.04M; lifetime LP-net 41.16M; future LP-net 36.96M.
+    for (const s of [scheduleFL, scheduleHF]) {
+      const gpCarry = s.distributionBreakdown.gpCatchUp + s.distributionBreakdown.gpProfitSplit
+      expect(gpCarry).toBeCloseTo(4_040_000, 0)
+      expect(s.lifetimeLpNet).toBeCloseTo(41_160_000, 0)
+      expect(s.futureLpNet).toBeCloseTo(36_960_000, 0)
+      // The narrative route's conditional label reads carryBindsInProjection =
+      // gpCarryProjected > 0 — carry binds on this fixture, so "net of carry" shows.
+      expect(gpCarry).toBeGreaterThan(0)
+    }
+  })
+
+  it('4. peak funding need ≤ remaining unfunded, computed on the forward-only series', () => {
+    // Both modes trough forward at 2027-03-31: FL ≈ $4.67M, HF ≈ $5.67M — well under
+    // the $7M dry-powder bound, and far below the lifetime trough (≈ $18.5M / $19.5M),
+    // which bundles sunk capital and is deliberately not this metric.
+    for (const [liq, schedule] of [[liqFL, scheduleFL], [liqHF, scheduleHF]] as const) {
+      expect(liq.peakFundingNeed!.value).toBeGreaterThan(0)
+      expect(liq.peakFundingNeed!.value).toBeLessThanOrEqual(7_000_000)
+      expect(liq.peakFundingNeed!.date > WESTBROOK_R2.asOfDate).toBe(true)
+      expect(liq.peakFundingNeed!.value).toBeLessThan(-schedule.trough!.value)
+    }
+    expect(liqFL.peakFundingNeed!.date).toBe('2027-03-31')
+    expect(liqFL.peakFundingNeed!.value).toBeCloseTo(4_671_200.84, 1)
+    expect(liqHF.peakFundingNeed!.date).toBe('2027-03-31')
+    expect(liqHF.peakFundingNeed!.value).toBeCloseTo(5_673_676.18, 1)
+  })
+
+  it('5. crossover on the lifetime series — DPI = 1.0 breakeven at Q3 2029', () => {
+    // Hand-sum of lifetime cumulative net: opens at 4.2M − 18M = −13.8M, all $7M of
+    // calls land by Q2 2028 (−20.8M cumulative outflow lifetime), and cumulative
+    // distributions (ITD 4.2M + projected) first exceed cumulative called at
+    // 2029-09-30: cumNet moves −2,787,566 → +468,816 on a $3,256,382 distribution.
+    // Identical in both modes — by Q3 2029 all calls are behind the LP either way.
+    for (const s of [scheduleFL, scheduleHF]) {
+      expect(s.crossover?.date).toBe('2029-09-30')
+      const firstNonNegative = s.periods.find(p => p.cumulativeNet >= 0)
+      expect(firstNonNegative?.date).toBe('2029-09-30')
+    }
+  })
+
+  it('6. sum-preservation to the penny — reshaping leaks nothing', () => {
+    // Total projected gross = (NAV × nav_multiple) + (future_called × call_multiple)
+    //                       = 19.5M × 1.6 + 7M × 1.4 = $41.0M.
+    const expectedFutureGross = 19_500_000 * 1.6 + 7_000_000 * 1.4
+    for (const s of [scheduleFL, scheduleHF]) {
+      const gpCarry = s.distributionBreakdown.gpCatchUp + s.distributionBreakdown.gpProfitSplit
+      // Lifetime LP-net + GP carry reassembles ITD distributions + projected gross.
+      expect(s.lifetimeLpNet + gpCarry).toBeCloseTo(
+        WESTBROOK_R2.distributionsToDate + expectedFutureGross, 2
+      )
+      // The J-curve reshaping releases exactly the future LP-net, no leakage.
+      expect(s.totalProjectedDistributions).toBeCloseTo(s.futureLpNet, 2)
+      // And the call track deploys exactly the unfunded commitment.
+      expect(s.totalProjectedCalls).toBeCloseTo(7_000_000, 2)
+    }
+  })
+})
+
 describe('deriveCapitalFields — called/unfunded/commitment triangle', () => {
   it('derives called from commitment and unfunded', () => {
     const r = deriveCapitalFields({ commitment: 10_000_000, calledToDate: null, unfundedCommitment: 4_000_000 })

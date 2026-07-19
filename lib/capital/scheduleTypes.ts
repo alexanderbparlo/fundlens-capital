@@ -39,6 +39,16 @@ export interface ConfirmedFields {
 
   historicalCalls: DatedCashFlow[]
   historicalDistributions: DatedCashFlow[]
+
+  // ── Reserved, NOT implemented (v1 known exclusions — see README "Known
+  // exclusions (v1)"). Each of these silently breaks the plain-vanilla pacing
+  // mechanics: recycling makes uncalled ≠ commitment − called; subscription lines
+  // shift observed call timing off the true deployment pace; NAV facilities
+  // manufacture non-exit distributions. Reserved so a later version can detect
+  // and reject (or model) them — no engine code reads these yet.
+  recyclingProvision?: boolean
+  subscriptionLineInUse?: boolean
+  navFacilityInUse?: boolean
 }
 
 // User-tunable pacing assumptions. Defaults are starting points; every value is

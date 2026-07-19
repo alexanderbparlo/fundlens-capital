@@ -1,5 +1,10 @@
 # FundLens Capital — v1 Build Handoff
 
+> **Code owns all cash-flow math and scenario arithmetic. Every parameter is
+> user-visible and defaulted from documented sources. The LLM's role is confined to
+> extraction, narration, and flagging input inconsistencies — it never selects a
+> parameter.**
+
 **Target:** Claude Code build session
 **Prerequisite skill files to load:** `fundlens-suite.md`, `fund-accounting-domain.md`, `anthropic-api-patterns.md`
 **Status:** Net-new tool in the DeciFin / FundLens suite

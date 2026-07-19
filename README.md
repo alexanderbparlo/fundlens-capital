@@ -21,6 +21,11 @@ EXTRACT (LLM)  →  CONFIRM (user QC gate)  →  PROJECT (deterministic TS)  →
 The projection engine never calls a model to compute, estimate, or reason about a
 number. The narrative layer receives the finished schedule and describes it.
 
+> **Code owns all cash-flow math and scenario arithmetic. Every parameter is
+> user-visible and defaulted from documented sources. The LLM's role is confined to
+> extraction, narration, and flagging input inconsistencies — it never selects a
+> parameter.**
+
 - **Call pacing** — front-loaded declining-weight curve, or history-fit to the observed
   deployment rhythm.
 - **Distribution pacing** — NAV grossed up by a forward value multiple, run through a
@@ -51,3 +56,23 @@ disabled.
 
 Single fund, single LP. Multi-fund portfolio aggregation, scenario branching, and
 tax-character modeling are planned for v2.
+
+### Known exclusions (v1)
+
+The pacing mechanics assume a plain-vanilla closed-end structure. The following
+features silently break that assumption and are **excluded by design** — if a fund
+has any of them, v1's projections will be wrong in the ways noted:
+
+- **Recycling provisions** — recycled distributions restore callable capital, so
+  uncalled ≠ commitment − called; the engine's unfunded arithmetic and the
+  peak-funding-need bound would both understate remaining call exposure.
+- **Subscription credit lines** — the fund borrows against LP commitments and calls
+  capital later in bulk, so observed call timing (and any history-fit to it) is the
+  facility's schedule, not the deployment pace.
+- **NAV-based facilities** — fund-level NAV loans manufacture distributions that are
+  not exit proceeds, so distribution history and the NAV-multiple gross-up would
+  double-count leveraged payouts.
+
+Reserved (unimplemented) input flags for these exist in
+`lib/capital/scheduleTypes.ts` so a later version can detect and reject or model
+them explicitly.
