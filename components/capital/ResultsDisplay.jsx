@@ -45,7 +45,7 @@ function ShareButton({ runId }) {
   )
 }
 
-export function ResultsDisplay({ fields, schedule, liquidity, narrative, isGeneratingNarrative, runId, onOverride, onBack, onReset }) {
+export function ResultsDisplay({ fields, schedule, liquidity, pacingConfig, narrative, isGeneratingNarrative, runId, onOverride, onBack, onReset }) {
   const currency = fields?.currency ?? 'USD'
 
   // Carry actually deducted by the European waterfall on this run. The "net of carry"
@@ -70,7 +70,7 @@ export function ResultsDisplay({ fields, schedule, liquidity, narrative, isGener
         </div>
         <div className="flex items-center gap-2">
           {runId && <ShareButton runId={runId} />}
-          <ExportButton schedule={schedule} fundName={fields?.fundName} />
+          <ExportButton schedule={schedule} fields={fields} config={pacingConfig} fundName={fields?.fundName} />
         </div>
       </div>
 

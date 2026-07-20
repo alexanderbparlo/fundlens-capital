@@ -30,6 +30,12 @@ number. The narrative layer receives the finished schedule and describes it.
   deployment rhythm.
 - **Distribution pacing** — NAV grossed up by a forward value multiple, run through a
   whole-fund (European) waterfall for net-of-carry distributions, released on a J-curve.
+  The preferred-return ledger credits distributions ROC-first (capital returns before
+  accrued preferred is paid down), so the ledger's final balance is exactly the
+  preferred entitlement the waterfall tier consumes. Future calls accrue preferred from
+  their actual projected call dates, which makes the waterfall (slightly)
+  pacing-mode-dependent by design — front-loaded and history-fit deploy the same
+  dollars on different dates.
 - **Outputs** — dated cash-flow schedule (editable per period), J-curve chart, net
   liquidity / treasury view with rolling dry-powder figures, CSV/Excel export, and an
   AI narrative.

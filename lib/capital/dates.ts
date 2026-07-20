@@ -16,6 +16,15 @@ export function quarterEndOf(date: Date): Date {
   return quarterEndForIndex(date.getUTCFullYear(), Math.floor(date.getUTCMonth() / 3))
 }
 
+// ISO quarter-end of the given ISO date. This is the single horizon derivation for
+// the distribution grid AND the preferred-accrual tail (round 3, Item 2): the grid
+// has always run through the quarter-end containing fundEndDate, so the accrual must
+// stop there too — one derivation, two consumers. Do not pass a raw fundEndDate as
+// an accrual endpoint anywhere.
+export function quarterEndIso(iso: string): string {
+  return isoDate(quarterEndOf(new Date(iso)))
+}
+
 // "Q3 2026" label for an ISO date.
 export function quarterLabel(iso: string): string {
   const d = new Date(iso)

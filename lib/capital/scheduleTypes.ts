@@ -115,6 +115,11 @@ export interface CapitalSchedule {
   lifetimeLpNet: number          // LP lifetime distributions net of carry (ITD + projected)
   futureLpNet: number            // projected future net-of-carry distributions
   distributionBreakdown: WaterfallBreakdown
+
+  preferredEntitlement: number     // ledger's final accrued balance — what the preferred tier consumes
+  accrualEndDate: string | null    // accrual + grid horizon: quarter-end of fundEndDate
+  effectivePeakDate: string | null // quarter the distribution curve actually peaks in
+  holdCapped: boolean              // true when the hold input saturated the peak cap
 }
 
 export interface LiquidityPeriod {

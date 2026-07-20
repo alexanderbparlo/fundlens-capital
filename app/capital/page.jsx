@@ -49,6 +49,7 @@ function ResultsStep({ cap }) {
       fields={cap.confirmedFields}
       schedule={cap.schedule}
       liquidity={cap.liquidity}
+      pacingConfig={cap.pacingConfig}
       narrative={cap.narrative}
       isGeneratingNarrative={cap.isGeneratingNarrative}
       runId={cap.runId}

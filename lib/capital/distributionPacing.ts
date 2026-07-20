@@ -4,7 +4,7 @@ import type {
   PacingConfig,
   WaterfallBreakdown,
 } from './scheduleTypes'
-import { enumerateQuarterEnds } from './dates'
+import { enumerateQuarterEnds, quarterEndIso } from './dates'
 import {
   splitProceeds,
   preferredReturnOutstanding,
@@ -19,6 +19,10 @@ export interface DistributionProjection {
   lifetimeLpNet: number      // LP lifetime distributions net of carry (ITD + projected)
   futureLpNet: number        // projected future net-of-carry distributions (the released total)
   breakdown: WaterfallBreakdown
+  preferredEntitlement: number     // the ledger's final accrued balance — the lifetime preferred entitlement the tier consumes
+  accrualEndDate: string | null    // shared horizon: quarter-end of fundEndDate (grid end == accrual end)
+  effectivePeakDate: string | null // quarter the release curve actually peaks in, after clamping
+  holdCapped: boolean              // true when avgRemainingHoldYears saturated the peak cap (input stopped moving the peak)
 }
 
 // Cumulative preferred-return entitlement on an outstanding-capital basis.
@@ -35,9 +39,14 @@ export interface DistributionProjection {
 // contributed at inception — overstating the hurdle so severely that carry could never
 // bind even on a genuine profit (the root cause behind the "net of carry but equal to
 // gross" report).
-function preferredOwed(fields: ConfirmedFields, futureCalledInPlay: number): number {
+function preferredOwed(
+  fields: ConfirmedFields,
+  futureCalledInPlay: number,
+  projectedCalls: DatedCashFlow[],
+  accrualEndDate: string
+): number {
   const { fundTerms } = fields
-  if (!fields.fundEndDate || fundTerms.hurdleRate <= 0) return 0
+  if (fundTerms.hurdleRate <= 0) return 0
 
   const start = fields.vintageDate ?? fields.asOfDate
   const hasHistory =
@@ -53,12 +62,30 @@ function preferredOwed(fields: ConfirmedFields, futureCalledInPlay: number): num
         { date: fields.asOfDate, amount: -Math.max(0, fields.distributionsToDate) },
       ]
 
-  // Future-called capital (when the call multiple is active) is contributed after the
-  // as-of date and accrues preferred from there through fund end. Approximated as a
-  // single contribution at the as-of date — remaining calls cluster early in the
-  // investment period — so it shares the same outstanding-capital accrual as paid-in.
+  // Future-called capital (when the call multiple is active) accrues preferred from
+  // the ACTUAL projected call dates — the same series the schedule deploys, per the
+  // selected pacing mode (round 3, Item 1; replaces the old single as-of lump, which
+  // overstated the entitlement by ~$518–569K on the Westbrook fixture).
+  //
+  // This deliberately ends the mode-independence of the waterfall: front-loaded and
+  // history-fit runs deploy the same dollars on different dates, so they now produce
+  // (slightly) different preferred entitlements, LP-net totals, and distribution
+  // schedules. That is the intended semantics — the entitlement should reflect when
+  // capital is actually outstanding — not an inconsistency to "fix".
+  //
+  // Per-period call overrides do NOT feed back into the accrual: the entitlement is
+  // computed from the projected pacing curve, keeping the waterfall independent of
+  // grid edits (an override reshapes the schedule, not the fund's economics).
   if (futureCalledInPlay > 0) {
-    events.push({ date: fields.asOfDate, amount: futureCalledInPlay })
+    const dated = projectedCalls.filter(c => c.amount > 0)
+    if (dated.length > 0) {
+      events.push(...dated.map(c => ({ date: c.date, amount: c.amount })))
+    } else {
+      // No projectable call schedule (e.g. no investment-period end date) — the
+      // as-of lump is the only representation left for capital that the gross
+      // projection nonetheless assumes gets called.
+      events.push({ date: fields.asOfDate, amount: futureCalledInPlay })
+    }
   }
 
   return preferredReturnOutstanding(
@@ -66,7 +93,7 @@ function preferredOwed(fields: ConfirmedFields, futureCalledInPlay: number): num
     fundTerms.hurdleRate,
     fundTerms.preferredCompounding,
     start,
-    fields.fundEndDate
+    accrualEndDate
   )
 }
 
@@ -99,6 +126,29 @@ function releaseWeights(count: number, peakIndex: number): number[] {
   return total > 0 ? raw.map(w => w / total) : raw.map(() => 1 / count)
 }
 
+// Peak-position cap: the release peak is held to ~80% of the horizon so a wind-down
+// taper always remains (final-quarter-spike guard). Shared by the projection and the
+// Pacing pane's saturation warning — one formula, two consumers.
+function maxPeakIndex(quarterCount: number): number {
+  return Math.max(1, Math.round((quarterCount - 1) * 0.8))
+}
+
+// Saturation check for the hold input (round 3, Item 3). The cap depends only on the
+// as-of → fund-end grid, so the Pacing pane can warn live before a schedule exists:
+// every hold at or beyond `maxHoldYears` maps to the same capped peak quarter.
+export function holdCapInfo(
+  asOfDate: string,
+  fundEndDate: string | null,
+  avgRemainingHoldYears: number
+): { capped: boolean; maxHoldYears: number } | null {
+  if (!fundEndDate) return null
+  const quarters = enumerateQuarterEnds(asOfDate, quarterEndIso(fundEndDate))
+  if (quarters.length === 0) return null
+  const maxPeak = maxPeakIndex(quarters.length)
+  const rawPeak = Math.round(Math.max(0, avgRemainingHoldYears) * 4)
+  return { capped: rawPeak > maxPeak, maxHoldYears: maxPeak / 4 }
+}
+
 // Projected LP distributions, net of GP carry, across the remaining fund life.
 //
 // 1. Lifetime gross to the LP = distributions received to date + projected future
@@ -106,9 +156,14 @@ function releaseWeights(count: number, peakIndex: number): number[] {
 // 2. Run the lifetime gross through the European waterfall to get lifetime LP-net.
 // 3. Future net-of-carry = lifetime LP-net − distributions already received.
 // 4. Release that future total across the quarters on the J-curve shape.
+//
+// `projectedCalls` is the call series the schedule will deploy (buildSchedule
+// computes projectCalls first and passes it in) — it drives the preferred accrual's
+// future-contribution dates, which makes this projection pacing-mode-dependent.
 export function projectDistributions(
   fields: ConfirmedFields,
-  config: PacingConfig
+  config: PacingConfig,
+  projectedCalls: DatedCashFlow[]
 ): DistributionProjection {
   // Projected future gross has two terms: current NAV grown by the NAV multiple, plus
   // future-called (unfunded) capital grown by its own, lower multiple. Late-deployed
@@ -127,35 +182,58 @@ export function projectDistributions(
   const projectedFutureGross = navGross + calledGross
   const lifetimeGross = Math.max(0, fields.distributionsToDate) + projectedFutureGross
 
+  // Single horizon constant: the quarter-end containing fundEndDate serves both the
+  // distribution grid and the accrual tail (Item 2 — one derivation, two consumers).
+  const accrualEndDate = fields.fundEndDate ? quarterEndIso(fields.fundEndDate) : null
+
+  const preferredEntitlement = accrualEndDate
+    ? preferredOwed(fields, futureCalledInPlay, projectedCalls, accrualEndDate)
+    : 0
+
   const terms: WaterfallTerms = {
     ...fields.fundTerms,
     paidIn: fields.calledToDate + futureCalledInPlay,
-    preferredOwed: preferredOwed(fields, futureCalledInPlay),
+    preferredOwed: preferredEntitlement,
   }
   const { lpNet: lifetimeLpNet, breakdown } = splitProceeds(lifetimeGross, terms)
 
   const futureLpNet = Math.max(0, lifetimeLpNet - Math.max(0, fields.distributionsToDate))
 
-  if (!fields.fundEndDate || futureLpNet <= EPSILON) {
-    return { periods: [], lifetimeLpNet, futureLpNet, breakdown }
+  const base = { lifetimeLpNet, futureLpNet, breakdown, preferredEntitlement, accrualEndDate }
+
+  if (!accrualEndDate || futureLpNet <= EPSILON) {
+    return { ...base, periods: [], effectivePeakDate: null, holdCapped: false }
   }
 
-  const quarters = enumerateQuarterEnds(fields.asOfDate, fields.fundEndDate)
+  const quarters = enumerateQuarterEnds(fields.asOfDate, accrualEndDate)
   if (quarters.length === 0) {
-    return { periods: [], lifetimeLpNet, futureLpNet, breakdown }
+    return { ...base, periods: [], effectivePeakDate: null, holdCapped: false }
   }
 
   // Peak position = avg remaining hold expressed in quarters, but capped to ~80% of
   // the horizon so a wind-down taper always remains. Within that band avgRemainingHold
   // moves the peak freely (a longer assumed hold pushes exits later); a hold at or
   // beyond the remaining fund life clamps to the cap rather than peaking at termination.
+  // The cap is correct but used to saturate silently — holdCapped/effectivePeakDate
+  // surface it (Item 3). No rescaling of the curve.
   const rawPeak = Math.round(Math.max(0, config.avgRemainingHoldYears) * 4)
-  const maxPeak = Math.max(1, Math.round((quarters.length - 1) * 0.8))
+  const maxPeak = maxPeakIndex(quarters.length)
   const peakIndex = Math.min(rawPeak, maxPeak)
   const weights = releaseWeights(quarters.length, peakIndex)
   const periods = quarters.map((date, i) => ({ date, amount: futureLpNet * weights[i] }))
 
-  return { periods, lifetimeLpNet, futureLpNet, breakdown }
+  // Mirror releaseWeights' internal clamp so the reported peak is the actual argmax.
+  const effectivePeakIndex =
+    quarters.length <= 2
+      ? quarters.length - 1
+      : Math.min(Math.max(peakIndex, 1), quarters.length - 2)
+
+  return {
+    ...base,
+    periods,
+    effectivePeakDate: quarters[effectivePeakIndex] ?? null,
+    holdCapped: rawPeak > maxPeak,
+  }
 }
 
 export { releaseWeights }

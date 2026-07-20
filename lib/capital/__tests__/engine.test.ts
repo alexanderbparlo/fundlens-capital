@@ -1,10 +1,20 @@
 import { describe, it, expect } from 'vitest'
 import type { ConfirmedFields, PacingConfig } from '../scheduleTypes'
 import { projectCalls } from '../callPacing'
-import { projectDistributions } from '../distributionPacing'
+import { projectDistributions, holdCapInfo } from '../distributionPacing'
 import { buildSchedule } from '../schedule'
 import { buildLiquidityView } from '../liquidityView'
 import { deriveCapitalFields, normalizeMagnitude } from '../extractionUtils'
+
+// projectDistributions requires the projected call series as of engine 1.2.0 — the
+// preferred accrual reads future contributions off the actual projected call dates,
+// which makes the waterfall pacing-mode-dependent (round 3, Item 1). Tests that
+// exercise the distribution track alone still need the matching call series.
+const distOf = (fields: ConfirmedFields, config: PacingConfig) =>
+  projectDistributions(fields, config, projectCalls(fields, config))
+
+const gpCarryOf = (d: { breakdown: { gpCatchUp: number; gpProfitSplit: number } }) =>
+  d.breakdown.gpCatchUp + d.breakdown.gpProfitSplit
 
 // ── Synthetic single-PE-fund LP fixture ─────────────────────────────────────────
 // Commitment 10M, called 6M → unfunded 4M, distributions ITD 2M, NAV 7M.
@@ -76,21 +86,30 @@ describe('callPacing — history-fit', () => {
 })
 
 describe('distributionPacing — J-curve, net of carry', () => {
-  const dist = projectDistributions(FIELDS, CONFIG)
+  const dist = distOf(FIELDS, CONFIG)
 
   it('grosses up NAV by the forward multiple, nets of carry over the whole fund', () => {
     // gross = 2M ITD + 7M × 1.6 = 13.2M. No dated history on this fixture, so preferred
-    // accrues on the synthetic fallback (6M paid-in at vintage, 2M distributed at as-of)
-    // = ~4.93M — below the 7.2M profit above ROC, so the GP fully catches up and carry
-    // binds. With full catch-up and pref ≤ profit-above-ROC, gpCarry = carry × (gross − paidIn)
-    // = 0.2 × (13.2M − 6M) = 1.44M, so lpNet = 13.2M − 1.44M = 11.76M.
-    expect(dist.lifetimeLpNet).toBeCloseTo(11_760_000, 0)
-    expect(dist.breakdown.gpCatchUp + dist.breakdown.gpProfitSplit).toBeCloseTo(1_440_000, 0)
+    // accrues on the synthetic fallback under ROC-first crediting (engine 1.2.0):
+    //   +6M at vintage 2021-01-01 → accrues 5.4921y to as-of: 6M × (1.08^5.4921 − 1)
+    //     = 3,156,274.76 accrued
+    //   −2M at as-of 2026-06-30 returns capital (ROC-first): capital 6M → 4M,
+    //     accrued untouched
+    //   tail 5.5031y on (4M + 3,156,274.76) to 2031-12-31 (fund end is already a
+    //     quarter-end, so Item 2 changes nothing here):
+    //   entitlement = 3,156,274.76 + 7,156,274.76 × (1.08^5.5031 − 1) = 6,930,011.27
+    // Tiers on 13.2M: ROC 6M → profit 7.2M; pref 6,930,011.27; remaining 269,988.73
+    // is BELOW the catch-up target (0.25 × pref = 1,732,502.82), so the GP catch-up is
+    // partial and the residual never splits:
+    //   gpCarry = 269,988.73 ; lpNet = 6M + 6,930,011.27 = 12,930,011.27.
+    expect(dist.preferredEntitlement).toBeCloseTo(6_930_011.27, 1)
+    expect(dist.lifetimeLpNet).toBeCloseTo(12_930_011.27, 1)
+    expect(gpCarryOf(dist)).toBeCloseTo(269_988.73, 1)
   })
 
   it('releases future net-of-carry = lifetime LP-net − distributions received', () => {
-    expect(dist.futureLpNet).toBeCloseTo(9_760_000, 0)
-    expect(sum(dist.periods.map(p => p.amount))).toBeCloseTo(9_760_000, 0)
+    expect(dist.futureLpNet).toBeCloseTo(10_930_011.27, 1)
+    expect(sum(dist.periods.map(p => p.amount))).toBeCloseTo(10_930_011.27, 1)
   })
 
   it('follows a J-curve: ramps to a peak, tapers to zero at fund end', () => {
@@ -104,7 +123,7 @@ describe('distributionPacing — J-curve, net of carry', () => {
 
   it('avgRemainingHold positions the peak — different holds, different peak quarters', () => {
     const peakOf = (years: number) => {
-      const amounts = projectDistributions(FIELDS, { ...CONFIG, avgRemainingHoldYears: years })
+      const amounts = distOf(FIELDS, { ...CONFIG, avgRemainingHoldYears: years })
         .periods.map(p => p.amount)
       return amounts.indexOf(Math.max(...amounts))
     }
@@ -118,7 +137,7 @@ describe('distributionPacing — J-curve, net of carry', () => {
   it('never spikes the largest distribution in the final quarter (peak-and-taper)', () => {
     // Default hold (5y) on this ~5.5y-remaining fixture: the old linear ramp peaked
     // at the last quarter; the bell caps the peak inside the horizon and tapers.
-    const amounts = projectDistributions(FIELDS, { ...CONFIG, avgRemainingHoldYears: 5 })
+    const amounts = distOf(FIELDS, { ...CONFIG, avgRemainingHoldYears: 5 })
       .periods.map(p => p.amount)
     const peakIdx = amounts.indexOf(Math.max(...amounts))
     expect(peakIdx).toBeLessThan(amounts.length - 1)
@@ -173,16 +192,24 @@ const WESTBROOK: ConfirmedFields = {
 }
 
 describe('distributionPacing — carry deducted on the Westbrook fixture', () => {
-  const dist = projectDistributions(WESTBROOK, CONFIG)
+  const dist = distOf(WESTBROOK, CONFIG)
 
   it('deducts GP carry once the LP clears return of capital + preferred', () => {
-    // Lifetime gross = 4.2M ITD + 19.5M × 1.6 = 35.4M.
+    // Lifetime gross = 4.2M ITD + 19.5M × 1.6 = 35.4M (call multiple 0 in CONFIG, so no
+    // future-called capital in gross, basis, or accrual).
     // Return of capital = 18M paid-in → profit above ROC = 17.4M.
-    // Preferred (outstanding-capital basis on the dated history) ≈ 9.25M < 17.4M, so the
-    // GP fully catches up. With full catch-up and pref ≤ profit-above-ROC the GP ends with
-    // exactly carry% of profit above ROC:  gpCarry = 0.20 × (35.4M − 18M) = 3.48M.
-    const gpCarry = dist.breakdown.gpCatchUp + dist.breakdown.gpProfitSplit
-    expect(gpCarry).toBeCloseTo(3_480_000, 0)
+    // Preferred under ROC-first crediting (engine 1.2.0): the dated event walk credits
+    // each of the $4.2M of historical distributions against unreturned capital (capital
+    // ends at 18M − 4.2M = 13.8M; accrued is never paid down), and the tail runs to the
+    // quarter-end horizon 2031-06-30 (Item 2):
+    //   entitlement = 13,621,513.82.
+    // Remaining after pref = 17.4M − 13,621,513.82 = 3,778,486.18 still EXCEEDS the
+    // catch-up target 0.25 × 13,621,513.82 = 3,405,378.46, so the GP fully catches up
+    // and the carry-invariance property holds: gpCarry = 0.20 × 17.4M = 3.48M exactly —
+    // this round-1 expectation deliberately survives the convention change.
+    //   (catch-up 3,405,378.46 + residual split 373,107.72 × 20% = 74,621.54 → 3.48M)
+    expect(dist.preferredEntitlement).toBeCloseTo(13_621_513.82, 1)
+    expect(gpCarryOf(dist)).toBeCloseTo(3_480_000, 0)
 
     // lpNet = ROC + pref + LP profit split = 18M + 0.80 × 17.4M = 31.92M.
     expect(dist.lifetimeLpNet).toBeCloseTo(31_920_000, 0)
@@ -205,7 +232,7 @@ describe('distributionPacing — forward multiple on called capital (Fix 3)', ()
   }
 
   it('adds future-called capital to the base: gross = NAV×navMult + called×callMult', () => {
-    const d = projectDistributions(noWaterfall, {
+    const d = distOf(noWaterfall, {
       ...CONFIG,
       forwardValueMultiple: 1.6,
       forwardCallMultiple: 1.4,
@@ -215,7 +242,7 @@ describe('distributionPacing — forward multiple on called capital (Fix 3)', ()
   })
 
   it('call_multiple = 0 reproduces the NAV-only base (backward compatible)', () => {
-    const d = projectDistributions(noWaterfall, {
+    const d = distOf(noWaterfall, {
       ...CONFIG,
       forwardValueMultiple: 1.6,
       forwardCallMultiple: 0,
@@ -223,22 +250,27 @@ describe('distributionPacing — forward multiple on called capital (Fix 3)', ()
     expect(d.futureLpNet).toBeCloseTo(31_200_000, 0) // 19.5×1.6 only
   })
 
-  it('carries the larger two-term profit tranche, counting future capital in ROC', () => {
-    const d = projectDistributions(WESTBROOK, { ...CONFIG, forwardCallMultiple: 1.4 })
+  it('carries the two-term profit tranche, counting future capital in ROC', () => {
+    const d = distOf(WESTBROOK, { ...CONFIG, forwardCallMultiple: 1.4 })
     // gross 45.2M; ROC = 18M called + 7M future = 25M; profit above ROC = 20.2M.
-    // Preferred (~12.7M) < profit above ROC, so full catch-up → gpCarry = 0.20 × 20.2M = 4.04M.
-    const gpCarry = d.breakdown.gpCatchUp + d.breakdown.gpProfitSplit
-    expect(gpCarry).toBeCloseTo(4_040_000, 0)
-    expect(d.lifetimeLpNet).toBeCloseTo(41_160_000, 0)
-    expect(d.futureLpNet).toBeCloseTo(36_960_000, 0)
+    // WESTBROOK's IP ends 2026-06-01, so the whole $7M future call lands in the single
+    // forward quarter 2026-06-30 and accrues from that date (engine 1.2.0 — actual call
+    // dates, not an as-of lump). ROC-first event walk to the 2031-06-30 horizon:
+    //   entitlement = 16,906,268.58.
+    // Remaining after pref = 20.2M − 16,906,268.58 = 3,293,731.42 is BELOW the catch-up
+    // target 0.25 × 16,906,268.58 = 4,226,567.15 → catch-up is PARTIAL, residual 0:
+    //   gpCarry = 3,293,731.42 ; lpNet = 45.2M − 3,293,731.42 = 41,906,268.58.
+    expect(d.preferredEntitlement).toBeCloseTo(16_906_268.58, 1)
+    expect(gpCarryOf(d)).toBeCloseTo(3_293_731.42, 1)
+    expect(d.lifetimeLpNet).toBeCloseTo(41_906_268.58, 1)
+    expect(d.futureLpNet).toBeCloseTo(37_706_268.58, 1)
   })
 
   it('does not carry the LP’s own returned future capital (vs. ignoring ROC basis)', () => {
     // If future capital were added to gross but NOT to ROC, profit above ROC would be
-    // 45.2M − 18M = 27.2M → carry 5.44M. Counting it in ROC keeps carry at 4.04M.
-    const d = projectDistributions(WESTBROOK, { ...CONFIG, forwardCallMultiple: 1.4 })
-    const gpCarry = d.breakdown.gpCatchUp + d.breakdown.gpProfitSplit
-    expect(gpCarry).toBeLessThan(5_440_000)
+    // 45.2M − 18M = 27.2M → carry up to 5.44M. Counting it in ROC keeps carry far below.
+    const d = distOf(WESTBROOK, { ...CONFIG, forwardCallMultiple: 1.4 })
+    expect(gpCarryOf(d)).toBeLessThan(5_440_000)
   })
 })
 
@@ -251,16 +283,19 @@ describe('buildSchedule — orchestration', () => {
 
   it('totals reconcile with the two tracks', () => {
     expect(schedule.totalProjectedCalls).toBeCloseTo(4_000_000, 0)
-    expect(schedule.totalProjectedDistributions).toBeCloseTo(9_760_000, 0)
+    // futureLpNet under the round-3 convention (worked math in the J-curve describe).
+    expect(schedule.totalProjectedDistributions).toBeCloseTo(10_930_011.27, 1)
   })
 
   it('troughs after the early calls, then crosses over to net-positive', () => {
     expect(schedule.trough?.date).toBe('2026-12-31')
-    expect(schedule.trough?.value).toBeLessThan(-7_950_000)
-    expect(schedule.trough?.value).toBeGreaterThan(-7_970_000)
+    // Opens at −4M, both calls (2.353M + 1.647M) land by Q4 2026 against 42,008.34 of
+    // early distributions: trough = −4M − 4M + 42,008.34 = −7,957,991.66.
+    expect(schedule.trough?.value).toBeCloseTo(-7_957_991.66, 1)
     expect(schedule.crossover).not.toBeNull()
-    // ends net-positive: opening −4M − calls 4M + distributions 9.76M = 1.76M
-    expect(schedule.periods.at(-1)!.cumulativeNet).toBeCloseTo(1_760_000, 0)
+    expect(schedule.crossover?.date).toBe('2030-09-30')
+    // ends net-positive: opening −4M − calls 4M + distributions 10,930,011.27 = 2,930,011.27
+    expect(schedule.periods.at(-1)!.cumulativeNet).toBeCloseTo(2_930_011.27, 1)
   })
 
   it('honors per-period overrides', () => {
@@ -429,25 +464,57 @@ describe('WESTBROOK_R2 — end-to-end regression (Round 2, Item 2 checklist)', (
   })
 
   it('3. distributions are net of carry; carry binds, so the conditional label state is "net of carry"', () => {
-    // Distribution track is independent of call timing, so the hand-computed WESTBROOK
-    // figures at call multiple 1.4 carry over exactly: gross 45.2M, ROC 25M (18M called
-    // + 7M future), profit above ROC 20.2M, pref ≈ 12.67M < 20.2M → full catch-up →
-    // gpCarry = 0.20 × 20.2M = 4.04M; lifetime LP-net 41.16M; future LP-net 36.96M.
+    // The distribution track is now pacing-mode-DEPENDENT (engine 1.2.0): the $7M of
+    // future calls accrues preferred from the dates each mode actually deploys it, so
+    // front-loaded and history-fit produce different entitlements. Worked math, both
+    // modes (gross 45.2M; ROC 25M = 18M called + 7M future; profit above ROC 20.2M):
+    //
+    // Dated event walk (ROC-first, compound 8%, vintage 2021-06-01 → horizon 2031-06-30):
+    // the 11 historical calls build capital to 14.3M while the $4.2M of historical
+    // distributions return capital as they land (capital 13.8M, accrued 4,509,150.07
+    // at the 2026-03-31 as-of). Future calls then contribute per mode:
+    //  · FL: 9 geometric calls from 2026-06-30 ($2,188,306.04) to 2028-06-30
+    //    ($126,151.49); capital tops out at 20.8M, accrued 8,841,098.55 after the last
+    //    call → tail to 2031-06-30 → entitlement 16,533,347.25.
+    //  · HF: 4 × $1,636,363.64 + $454,545.45 by 2027-06-30 — the same dollars arrive
+    //    EARLIER, so more accrues → entitlement 16,584,370.58.
+    //
+    // Tiers: remaining after pref (20.2M − E) is below the catch-up target 0.25 × E in
+    // both modes (FL: 3,666,652.75 < 4,133,336.81; HF: 3,615,629.42 < 4,146,092.65),
+    // so catch-up is PARTIAL, the residual never splits, and gpCarry = 20.2M − E:
+    //  · FL: gpCarry 3,666,652.75; lifetime LP-net 41,533,347.25; future 37,333,347.25
+    //  · HF: gpCarry 3,615,629.42; lifetime LP-net 41,584,370.58; future 37,384,370.58
+    //
+    // Cross-check: the adversarial band for corrected future LP-net was
+    // $37.106M–$37.157M computed with accrual stopping at raw fund end 2031-06-01;
+    // Item 2 extends the tail 29 days to the 2031-06-30 grid horizon, adding
+    // ~$227.4K/$227.7K of entitlement which flows dollar-for-dollar to the LP because
+    // catch-up is partial. Deviation traced in the round-3 delta memo.
+    expect(scheduleFL.preferredEntitlement).toBeCloseTo(16_533_347.25, 1)
+    expect(gpCarryOf({ breakdown: scheduleFL.distributionBreakdown })).toBeCloseTo(3_666_652.75, 1)
+    expect(scheduleFL.lifetimeLpNet).toBeCloseTo(41_533_347.25, 1)
+    expect(scheduleFL.futureLpNet).toBeCloseTo(37_333_347.25, 1)
+
+    expect(scheduleHF.preferredEntitlement).toBeCloseTo(16_584_370.58, 1)
+    expect(gpCarryOf({ breakdown: scheduleHF.distributionBreakdown })).toBeCloseTo(3_615_629.42, 1)
+    expect(scheduleHF.lifetimeLpNet).toBeCloseTo(41_584_370.58, 1)
+    expect(scheduleHF.futureLpNet).toBeCloseTo(37_384_370.58, 1)
+
+    // Same dollars deployed earlier (HF) accrue MORE preferred — directional sanity.
+    expect(scheduleHF.preferredEntitlement).toBeGreaterThan(scheduleFL.preferredEntitlement)
+
     for (const s of [scheduleFL, scheduleHF]) {
-      const gpCarry = s.distributionBreakdown.gpCatchUp + s.distributionBreakdown.gpProfitSplit
-      expect(gpCarry).toBeCloseTo(4_040_000, 0)
-      expect(s.lifetimeLpNet).toBeCloseTo(41_160_000, 0)
-      expect(s.futureLpNet).toBeCloseTo(36_960_000, 0)
       // The narrative route's conditional label reads carryBindsInProjection =
       // gpCarryProjected > 0 — carry binds on this fixture, so "net of carry" shows.
-      expect(gpCarry).toBeGreaterThan(0)
+      expect(gpCarryOf({ breakdown: s.distributionBreakdown })).toBeGreaterThan(0)
     }
   })
 
   it('4. peak funding need ≤ remaining unfunded, computed on the forward-only series', () => {
-    // Both modes trough forward at 2027-03-31: FL ≈ $4.67M, HF ≈ $5.67M — well under
-    // the $7M dry-powder bound, and far below the lifetime trough (≈ $18.5M / $19.5M),
-    // which bundles sunk capital and is deliberately not this metric.
+    // Both modes trough forward at 2027-03-31 — under the $7M dry-powder bound, and far
+    // below the lifetime trough, which bundles sunk capital and is deliberately not this
+    // metric. Values shift slightly vs round 2 because the larger LP-net (Item 1 swings
+    // carry back to the LP) raises the early distributions offsetting the calls.
     for (const [liq, schedule] of [[liqFL, scheduleFL], [liqHF, scheduleHF]] as const) {
       expect(liq.peakFundingNeed!.value).toBeGreaterThan(0)
       expect(liq.peakFundingNeed!.value).toBeLessThanOrEqual(7_000_000)
@@ -455,17 +522,17 @@ describe('WESTBROOK_R2 — end-to-end regression (Round 2, Item 2 checklist)', (
       expect(liq.peakFundingNeed!.value).toBeLessThan(-schedule.trough!.value)
     }
     expect(liqFL.peakFundingNeed!.date).toBe('2027-03-31')
-    expect(liqFL.peakFundingNeed!.value).toBeCloseTo(4_671_200.84, 1)
+    expect(liqFL.peakFundingNeed!.value).toBeCloseTo(4_662_394.67, 1)
     expect(liqHF.peakFundingNeed!.date).toBe('2027-03-31')
-    expect(liqHF.peakFundingNeed!.value).toBeCloseTo(5_673_676.18, 1)
+    expect(liqHF.peakFundingNeed!.value).toBeCloseTo(5_663_666.52, 1)
   })
 
   it('5. crossover on the lifetime series — DPI = 1.0 breakeven at Q3 2029', () => {
     // Hand-sum of lifetime cumulative net: opens at 4.2M − 18M = −13.8M, all $7M of
     // calls land by Q2 2028 (−20.8M cumulative outflow lifetime), and cumulative
     // distributions (ITD 4.2M + projected) first exceed cumulative called at
-    // 2029-09-30: cumNet moves −2,787,566 → +468,816 on a $3,256,382 distribution.
-    // Identical in both modes — by Q3 2029 all calls are behind the LP either way.
+    // 2029-09-30. The ~1% larger future LP-net under the round-3 convention does not
+    // pull the breakeven into an earlier quarter in either mode.
     for (const s of [scheduleFL, scheduleHF]) {
       expect(s.crossover?.date).toBe('2029-09-30')
       const firstNonNegative = s.periods.find(p => p.cumulativeNet >= 0)
@@ -492,6 +559,220 @@ describe('WESTBROOK_R2 — end-to-end regression (Round 2, Item 2 checklist)', (
       // And the call track deploys exactly the unfunded commitment.
       expect(s.totalProjectedCalls).toBeCloseTo(7_000_000, 2)
     }
+  })
+})
+
+// ── Round 3 — Item 1 property tests: the ledger and the tiers agree by construction ──
+describe('Round 3 property — waterfall identities under ROC-first crediting', () => {
+  const cases: Array<[string, ConfirmedFields, PacingConfig]> = [
+    ['FIELDS synthetic', FIELDS, CONFIG],
+    ['WESTBROOK callMult 0', WESTBROOK, CONFIG],
+    ['WESTBROOK_R2 front-loaded 1.4', { ...WESTBROOK, investmentPeriodEndDate: '2028-06-01' }, { ...CONFIG, forwardCallMultiple: 1.4 }],
+    ['WESTBROOK_R2 history-fit 1.4', { ...WESTBROOK, investmentPeriodEndDate: '2028-06-01' }, { ...CONFIG, forwardCallMultiple: 1.4, callCurve: 'history-fit' }],
+  ]
+
+  it('lifetimeLpNet + gpCarry === lifetimeGross to the penny', () => {
+    for (const [, fields, config] of cases) {
+      const d = distOf(fields, config)
+      const callMult = Math.max(0, config.forwardCallMultiple)
+      const lifetimeGross =
+        fields.distributionsToDate +
+        fields.currentNav * config.forwardValueMultiple +
+        fields.unfundedCommitment * callMult
+      expect(d.lifetimeLpNet + gpCarryOf(d)).toBeCloseTo(lifetimeGross, 2)
+    }
+  })
+
+  it('the preferred tier consumes exactly the ledger’s final entitlement — no paid-vs-owed gap', () => {
+    // ROC-first crediting makes the ledger’s final accrued balance the lifetime
+    // entitlement; whenever gross reaches the tier, the tier consumes exactly it.
+    for (const [, fields, config] of cases) {
+      const d = distOf(fields, config)
+      expect(d.breakdown.preferredReturn).toBeCloseTo(
+        Math.min(d.preferredEntitlement, Math.max(0, d.lifetimeLpNet + gpCarryOf(d) - d.breakdown.returnOfCapital)),
+        2
+      )
+      // On these fixtures gross clears ROC + pref, so the tier IS the entitlement.
+      expect(d.breakdown.preferredReturn).toBeCloseTo(d.preferredEntitlement, 2)
+    }
+  })
+})
+
+// ── Round 3 — Item 2: one horizon, two consumers ─────────────────────────────────
+describe('Round 3 Item 2 — accrual endpoint equals the final grid date', () => {
+  it('holds for arbitrary fund-end inputs, including ones already on a quarter-end', () => {
+    // Raw fund ends mid-quarter used to leave a gap: accrual stopped at fundEndDate
+    // while the grid ran to its quarter-end ($230,915.62 of entitlement on the old
+    // convention). Both now derive from quarterEndOf(fundEndDate).
+    const ends: Array<[string, string]> = [
+      ['2031-06-01', '2031-06-30'], // mid-quarter (the Westbrook gap)
+      ['2031-06-30', '2031-06-30'], // already a quarter-end
+      ['2031-12-31', '2031-12-31'], // year-end quarter-end
+      ['2030-01-15', '2030-03-31'], // early in a quarter
+    ]
+    for (const [fundEnd, expected] of ends) {
+      const d = distOf({ ...WESTBROOK, fundEndDate: fundEnd }, CONFIG)
+      expect(d.accrualEndDate).toBe(expected)
+      expect(d.periods.at(-1)!.date).toBe(expected)
+    }
+  })
+})
+
+// ── Round 3 — Item 3: the hold cap is real but no longer silent ──────────────────
+describe('Round 3 Item 3 — hold-input saturation surfaced', () => {
+  const R2: ConfirmedFields = { ...WESTBROOK, investmentPeriodEndDate: '2028-06-01' }
+  const cfg = (hold: number): PacingConfig =>
+    ({ ...CONFIG, forwardCallMultiple: 1.4, avgRemainingHoldYears: hold })
+
+  it('hold = 1 → peak Q2 2027, not capped', () => {
+    const d = distOf(R2, cfg(1))
+    const amounts = d.periods.map(p => p.amount)
+    expect(amounts.indexOf(Math.max(...amounts))).toBe(4) // 1y × 4 quarters
+    expect(d.effectivePeakDate).toBe('2027-06-30')
+    expect(d.holdCapped).toBe(false)
+  })
+
+  it('hold = 8 → peak clamps to the 80%-of-horizon cap and reports it', () => {
+    const d = distOf(R2, cfg(8))
+    const amounts = d.periods.map(p => p.amount)
+    expect(amounts.indexOf(Math.max(...amounts))).toBe(16) // cap on the 21-quarter grid
+    expect(d.effectivePeakDate).toBe('2030-06-30')
+    expect(d.holdCapped).toBe(true)
+  })
+
+  it('holdCapInfo mirrors the projection cap for the Pacing pane, pre-schedule', () => {
+    // 21-quarter grid → maxPeak 16 → saturation begins beyond a 4-year hold.
+    expect(holdCapInfo(R2.asOfDate, R2.fundEndDate, 4)).toEqual({ capped: false, maxHoldYears: 4 })
+    expect(holdCapInfo(R2.asOfDate, R2.fundEndDate, 8)).toEqual({ capped: true, maxHoldYears: 4 })
+    expect(holdCapInfo(R2.asOfDate, null, 4)).toBeNull()
+  })
+})
+
+// ── Round 3 — Phase 3: the adversarial report’s ten-case seeded battery ──────────
+// Cases 1, 3, 4, 10 touch preferred mechanics, so their expected values were
+// recomputed under the 1.2.0 convention (independent dated-event-walk script; each
+// case's comment shows the recomputation). Cases 2, 5–9 assert their original
+// detecting assertions unchanged. Where a case's *side-column* figure in the report
+// was waterfall-derived it is recomputed here and traced in the round-3 run log —
+// notably case 2's "GP carry $0", which never matched either engine convention
+// (carry is 3.48M with the call multiple off; flagged in the log, not a regression).
+describe('Round 3 Phase-3 — seeded-discrepancy battery', () => {
+  const R2: ConfirmedFields = { ...WESTBROOK, investmentPeriodEndDate: '2028-06-01' }
+  const BAT: PacingConfig = { ...CONFIG, forwardCallMultiple: 1.4 }
+
+  it('case 1 — NAV multiple 0.9×: carry cannot bind, label reads gross', () => {
+    // gross = 4.2M + 19.5M × 0.9 + 7M × 1.4 = 31.55M; profit above ROC = 6.55M is fully
+    // absorbed by the preferred tier (entitlement 16.53M ≫ 6.55M) → gpCarry 0,
+    // future LP-net = 31.55M − 4.2M = 27.35M (matches the report — unchanged because
+    // the pref tier saturates under both conventions).
+    const d = distOf(R2, { ...BAT, forwardValueMultiple: 0.9 })
+    expect(gpCarryOf(d)).toBe(0)
+    expect(d.futureLpNet).toBeCloseTo(27_350_000, 1)
+  })
+
+  it('case 2 — call multiple 0: projected gross is exactly NAV × 1.6', () => {
+    const d = distOf(R2, { ...BAT, forwardCallMultiple: 0 })
+    // Detecting assertion: future gross = 19.5M × 1.6 = 31.2M, recovered from the
+    // identity futureLpNet + gpCarry = future gross.
+    expect(d.futureLpNet + gpCarryOf(d)).toBeCloseTo(31_200_000, 2)
+    // Recomputed side value (report column said $0 — see note above): with 18M
+    // paid-in and entitlement 13,621,513.82 the catch-up completes → carry 3.48M.
+    expect(gpCarryOf(d)).toBeCloseTo(3_480_000, 0)
+  })
+
+  it('case 3 — unfunded $0 (commitment = called = 18M): no calls, PFN zero', () => {
+    const f: ConfirmedFields = { ...R2, commitment: 18_000_000, unfundedCommitment: 0 }
+    const s = buildSchedule(f, BAT)
+    const liq = buildLiquidityView(s, f)
+    for (const p of s.periods) expect(p.call).toBe(0)
+    expect(liq.peakFundingNeed).toBeNull() // surfaced as $0 forward need
+    // Recompute: with no future calls the economics reduce to the 18M/31.2M case —
+    // entitlement 13,621,513.82, catch-up completes, carry 0.2 × 17.4M = 3.48M,
+    // future LP-net 27.72M (matches the report's figures).
+    expect(gpCarryOf({ breakdown: s.distributionBreakdown })).toBeCloseTo(3_480_000, 0)
+    expect(s.futureLpNet).toBeCloseTo(27_720_000, 0)
+  })
+
+  it('case 4 — hurdle 0%: first dollar above ROC enters carry mechanics', () => {
+    // Recompute: entitlement 0 → no pref tier, no catch-up; residual 20.2M splits
+    // 80/20 → gpCarry = 4.04M, lifetime LP-net 41.16M (matches the report — the
+    // convention change is inert when there is no preferred to credit).
+    const f: ConfirmedFields = { ...R2, fundTerms: { ...R2.fundTerms, hurdleRate: 0 } }
+    const d = distOf(f, BAT)
+    expect(d.preferredEntitlement).toBe(0)
+    expect(gpCarryOf(d)).toBeCloseTo(4_040_000, 1)
+    expect(d.lifetimeLpNet).toBeCloseTo(41_160_000, 1)
+  })
+
+  it('case 5 — carry 0%: LP-net future distributions equal projected gross', () => {
+    const f: ConfirmedFields = { ...R2, fundTerms: { ...R2.fundTerms, carryRate: 0 } }
+    const d = distOf(f, BAT)
+    expect(gpCarryOf(d)).toBe(0)
+    expect(d.lifetimeLpNet).toBeCloseTo(45_200_000, 2)
+    expect(d.futureLpNet).toBeCloseTo(41_000_000, 2)
+    expect(sum(d.periods.map(p => p.amount))).toBeCloseTo(41_000_000, 1)
+  })
+
+  it('case 6 — IP end 2026-06-01: exactly one nonzero forward call of $7M, both modes', () => {
+    const f: ConfirmedFields = { ...R2, investmentPeriodEndDate: '2026-06-01' }
+    for (const curve of ['front-loaded', 'history-fit'] as const) {
+      const calls = projectCalls(f, { ...BAT, callCurve: curve })
+      const nonzero = calls.filter(c => c.amount > 1e-6)
+      expect(nonzero).toHaveLength(1)
+      expect(nonzero[0].amount).toBeCloseTo(7_000_000, 2)
+      expect(nonzero[0].date).toBe('2026-06-30')
+    }
+    // PFN recomputed under 1.2.0: 7M call less the first-quarter LP-net distribution
+    // (30,572.42 of the 37,706,268.58 future total) = 6,969,427.58. The report's
+    // 6,970,032.66 was derived from the old-convention distribution level.
+    const s = buildSchedule(f, BAT)
+    const liq = buildLiquidityView(s, f)
+    expect(liq.peakFundingNeed!.value).toBeCloseTo(6_969_427.58, 1)
+    expect(liq.peakFundingNeed!.value).toBeLessThanOrEqual(7_000_000)
+  })
+
+  it('case 7 — hold 1y vs 8y: peak index moves 4 → 16', () => {
+    const peakIdx = (hold: number) => {
+      const amounts = distOf(R2, { ...BAT, avgRemainingHoldYears: hold }).periods.map(p => p.amount)
+      return amounts.indexOf(Math.max(...amounts))
+    }
+    expect(peakIdx(1)).toBe(4)   // 2027-06-30
+    expect(peakIdx(8)).toBe(16)  // capped at 2030-06-30
+  })
+
+  it('case 8 — hold 12y: peak stays at the cap, final quarter zero, sum preserved', () => {
+    const d = distOf(R2, { ...BAT, avgRemainingHoldYears: 12 })
+    const amounts = d.periods.map(p => p.amount)
+    expect(amounts.indexOf(Math.max(...amounts))).toBe(16)
+    expect(d.holdCapped).toBe(true)
+    expect(amounts.at(-1)!).toBeCloseTo(0, 6)
+    // Sum preserved = the full future LP-net releases (37,333,347.25 under 1.2.0).
+    expect(sum(amounts)).toBeCloseTo(d.futureLpNet, 2)
+    expect(d.futureLpNet).toBeCloseTo(37_333_347.25, 1)
+  })
+
+  it('case 9 — NAV $0, call multiple 0: no distributions, PFN equals unfunded, no crossover', () => {
+    const f: ConfirmedFields = { ...R2, currentNav: 0 }
+    const s = buildSchedule(f, { ...BAT, forwardCallMultiple: 0 })
+    const liq = buildLiquidityView(s, f)
+    for (const p of s.periods) expect(p.distribution).toBe(0)
+    expect(s.futureLpNet).toBe(0)
+    expect(liq.peakFundingNeed!.value).toBeCloseTo(7_000_000, 2)
+    expect(s.crossover).toBeNull()
+  })
+
+  it('case 10 — NAV multiple 1.3765679416×: preferred absorbs all profit, GP gets nothing', () => {
+    // gross = 4.2M + 19.5M × 1.3765679416 + 9.8M = 40,843,074.86; profit above ROC =
+    // 15,843,074.86. The report seeded this so the OLD convention's catch-up landed
+    // exactly funded with residual ≈ 0 (GP = catch-up only, 3,168,614.97). Under
+    // ROC-first the entitlement is 16,533,347.25 > profit, so the preferred tier caps
+    // at the profit itself, the catch-up never starts, and the GP receives $0 —
+    // the recomputed detecting outcome for this seed.
+    const d = distOf(R2, { ...BAT, forwardValueMultiple: 1.3765679416 })
+    expect(d.breakdown.preferredReturn).toBeCloseTo(15_843_074.86, 1)
+    expect(d.breakdown.gpCatchUp).toBe(0)
+    expect(gpCarryOf(d)).toBe(0)
+    expect(d.lifetimeLpNet).toBeCloseTo(40_843_074.86, 1)
   })
 })
 

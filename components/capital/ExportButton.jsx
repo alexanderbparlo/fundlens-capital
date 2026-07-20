@@ -1,30 +1,12 @@
 'use client'
 import { useState } from 'react'
 import { Download } from 'lucide-react'
-
-const COLUMNS = [
-  ['quarter', 'Quarter'],
-  ['call', 'Projected Call'],
-  // Distributions pass through the whole-fund waterfall — the schedule is LP-net,
-  // never gross, so the export says so explicitly.
-  ['distribution', 'LP-net Distribution'],
-  ['netCashFlow', 'Net Cash Flow'],
-  ['cumulativeCalled', 'Cumulative Called'],
-  ['cumulativeDistributed', 'Cumulative Distributed'],
-  ['cumulativeNet', 'Cumulative Net'],
-]
-
-function toRows(schedule) {
-  return schedule.periods.map(p => ({
-    quarter: p.label,
-    call: Math.round(p.call),
-    distribution: Math.round(p.distribution),
-    netCashFlow: Math.round(p.netCashFlow),
-    cumulativeCalled: Math.round(p.cumulativeCalled),
-    cumulativeDistributed: Math.round(p.cumulativeDistributed),
-    cumulativeNet: Math.round(p.cumulativeNet),
-  }))
-}
+import {
+  SCHEDULE_COLUMNS,
+  buildDisplayRows,
+  buildSummaryRows,
+  buildCsv,
+} from '@/lib/capital/exportRows'
 
 function download(blob, filename) {
   const url = URL.createObjectURL(blob)
@@ -35,29 +17,34 @@ function download(blob, filename) {
   URL.revokeObjectURL(url)
 }
 
-export function ExportButton({ schedule, fundName }) {
+// Exports delegate all row/summary construction to lib/capital/exportRows.ts — the
+// display-rounding (largest-remainder) and the projection-summary block are pure,
+// unit-tested functions; this component only handles the download plumbing.
+export function ExportButton({ schedule, fields, config, fundName }) {
   const [busy, setBusy] = useState(false)
   const base = (fundName || 'fundlens-capital').replace(/[^a-z0-9]+/gi, '-').toLowerCase()
 
   const exportCsv = () => {
-    const rows = toRows(schedule)
-    const header = COLUMNS.map(c => c[1]).join(',')
-    const body = rows.map(r => COLUMNS.map(c => r[c[0]]).join(',')).join('\n')
-    download(new Blob([`${header}\n${body}`], { type: 'text/csv' }), `${base}-schedule.csv`)
+    const csv = buildCsv(schedule, fields, config)
+    download(new Blob([csv], { type: 'text/csv' }), `${base}-schedule.csv`)
   }
 
   const exportXlsx = async () => {
     setBusy(true)
     try {
       const { utils, write } = await import('xlsx')
-      const rows = toRows(schedule).map(r => {
+      const rows = buildDisplayRows(schedule).map(r => {
         const out = {}
-        for (const [key, label] of COLUMNS) out[label] = r[key]
+        for (const [key, label] of SCHEDULE_COLUMNS) out[label] = r[key]
         return out
       })
-      const ws = utils.json_to_sheet(rows)
       const wb = utils.book_new()
-      utils.book_append_sheet(wb, ws, 'Cash-Flow Schedule')
+      utils.book_append_sheet(wb, utils.json_to_sheet(rows), 'Cash-Flow Schedule')
+      const summary = buildSummaryRows(schedule, fields, config).map(([label, value]) => ({
+        'Projection Summary': label,
+        Value: value,
+      }))
+      utils.book_append_sheet(wb, utils.json_to_sheet(summary), 'Projection Summary')
       const buf = write(wb, { bookType: 'xlsx', type: 'array' })
       download(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `${base}-schedule.xlsx`)
     } finally {

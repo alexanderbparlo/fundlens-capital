@@ -30,16 +30,26 @@ export interface PreferredEvent {
 // compounding (or simple-accruing) the hurdle between events, and crediting each
 // distribution against the outstanding balance so it stops accruing preferred on
 // capital that has already been returned. The remaining capital then continues to
-// accrue through `endDate` (the projected final distribution at fund end).
+// accrue through `endDate` (the quarter-end distribution horizon).
 //
-// This corrects the prior over-accrual that compounded the *entire* paid-in from
-// vintage to fund end as though all capital were contributed at inception — which
-// inflated the hurdle so far that carry could never bind even on a real profit.
+// Crediting convention (round 3, Item 1): ROC-FIRST (European). A distribution
+// returns unreturned capital first (floored at 0); only the excess pays down
+// accrued preferred. Under a whole-fund European waterfall no dollar is preferred
+// until capital is fully returned, so the ledger's final accrued balance IS the
+// lifetime preferred entitlement, and the waterfall's preferred tier consumes
+// exactly that — ledger and tiers agree by construction, and the catch-up target
+// (preferredPaid × carry/(1−carry)) is consistent without modification.
 //
-//   compound: the hurdle compounds on (unreturned capital + unpaid preferred);
-//             distributions pay down accrued preferred first, then capital.
-//   simple:   the hurdle accrues linearly on unreturned capital only;
-//             distributions return capital.
+// Rejected alternative (recorded for auditability — do NOT implement): keep
+// pref-first crediting and carry the paid-preferred into the lifetime tier and
+// catch-up base. Defensible for a deal-by-deal (American) LPA, where distributions
+// settle each deal's pref as they arrive; not what this fund's whole-fund European
+// terms describe. The previous mixed state — pref-first ledger feeding ROC-first
+// tiers — characterized the same historical dollars two different ways and swung
+// ~$714K of carry to the GP on the Westbrook fixture.
+//
+//   compound: the hurdle compounds on (unreturned capital + unpaid preferred).
+//   simple:   the hurdle accrues linearly on unreturned capital only.
 export function preferredReturnOutstanding(
   events: PreferredEvent[],
   hurdleRate: number,
@@ -69,13 +79,12 @@ export function preferredReturnOutstanding(
     if (e.amount > 0) {
       capital += e.amount // contribution
     } else {
+      // ROC-first: return capital, then pay down accrued preferred with any excess.
       let credit = -e.amount // distribution magnitude
-      if (compounding === 'compound') {
-        const payPref = Math.min(accrued, credit)
-        accrued -= payPref
-        credit -= payPref
-      }
-      capital = Math.max(0, capital - credit)
+      const returned = Math.min(capital, credit)
+      capital -= returned
+      credit -= returned
+      accrued = Math.max(0, accrued - credit)
     }
     last = e.date
   }

@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { formatCurrency } from '@/lib/utils'
+import { holdCapInfo } from '@/lib/capital/distributionPacing'
 
 function Segmented({ value, options, onChange }) {
   return (
@@ -51,6 +52,14 @@ export function PacingConfig({ fields, initialConfig, onRun, onBack }) {
   const navGross = Math.max(0, fields?.currentNav ?? 0) * (Number(config.forwardValueMultiple) || 0)
   const calledGross = Math.max(0, fields?.unfundedCommitment ?? 0) * (Number(config.forwardCallMultiple) || 0)
   const projectedGross = navGross + calledGross
+
+  // The J-curve peak is capped at ~80% of the remaining fund life so a wind-down taper
+  // always remains. Beyond that the hold input stops moving the peak — say so instead
+  // of saturating silently (round 3, Item 3). Same formula the engine reports as
+  // `holdCapped` on the built schedule.
+  const holdCap = fields?.asOfDate
+    ? holdCapInfo(fields.asOfDate, fields.fundEndDate ?? null, Number(config.avgRemainingHoldYears) || 0)
+    : null
 
   const set = (key, value) => setConfig(prev => ({ ...prev, [key]: value }))
 
@@ -126,6 +135,12 @@ export function PacingConfig({ fields, initialConfig, onRun, onBack }) {
               suffix="yrs"
             />
           </div>
+          {holdCap?.capped && (
+            <p className="font-body text-data-sm text-data-flag mt-3 max-w-[56ch]">
+              Hold capped at ~{holdCap.maxHoldYears} years by remaining fund life — the distribution
+              peak stays inside the wind-down taper, so longer holds no longer move it.
+            </p>
+          )}
           <div className="card px-4 py-3 mt-5 inline-flex items-baseline gap-2">
             <span className="font-body text-data-sm text-text-muted">Projected gross:</span>
             <span className="data-value text-data-sm text-text-primary">{formatCurrency(projectedGross, fields?.currency)}</span>

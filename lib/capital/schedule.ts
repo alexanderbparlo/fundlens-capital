@@ -13,15 +13,23 @@ import { projectDistributions } from './distributionPacing'
 // 1.1.0 — remediation round 1: outstanding-capital preferred accrual (carry now binds),
 //   raised-cosine peak-and-taper distribution curve, forward multiple on called capital,
 //   forward-only peak funding need.
-export const ENGINE_VERSION = '1.1.0'
+// 1.2.0 — round 3: (a) ROC-first (European) preferred crediting — distributions return
+//   capital before paying accrued preferred, so the ledger's final balance IS the
+//   lifetime entitlement the preferred tier consumes; (b) future calls accrue preferred
+//   from their actual projected dates per pacing mode — the waterfall is deliberately
+//   no longer mode-independent; (c) accrual endpoint aligned to the quarter-end
+//   distribution horizon (quarterEndOf(fundEndDate)).
+export const ENGINE_VERSION = '1.2.0'
 
 const EPSILON = 1e-6
 
 // Orchestrates the two independent projection tracks into one dated grid, applies
 // per-period overrides, and accumulates running positions opening from ITD actuals.
 export function buildSchedule(fields: ConfirmedFields, config: PacingConfig): CapitalSchedule {
+  // Calls are computed first: the distribution track's preferred accrual needs the
+  // projected call dates (the waterfall is pacing-mode-dependent as of engine 1.2.0).
   const callSeries = projectCalls(fields, config)
-  const distribution = projectDistributions(fields, config)
+  const distribution = projectDistributions(fields, config, callSeries)
 
   const callByDate = new Map(callSeries.map(c => [c.date, c.amount]))
   const distByDate = new Map(distribution.periods.map(d => [d.date, d.amount]))
@@ -108,5 +116,9 @@ export function buildSchedule(fields: ConfirmedFields, config: PacingConfig): Ca
     lifetimeLpNet: distribution.lifetimeLpNet,
     futureLpNet: distribution.futureLpNet,
     distributionBreakdown: distribution.breakdown,
+    preferredEntitlement: distribution.preferredEntitlement,
+    accrualEndDate: distribution.accrualEndDate,
+    effectivePeakDate: distribution.effectivePeakDate,
+    holdCapped: distribution.holdCapped,
   }
 }

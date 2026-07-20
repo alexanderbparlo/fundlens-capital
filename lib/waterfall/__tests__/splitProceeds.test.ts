@@ -86,9 +86,11 @@ describe('preferredReturnOutstanding — outstanding-capital accrual', () => {
     expect(pref).toBeCloseTo(4_692_506.79, 0)
   })
 
-  it('credits distributions against outstanding capital, lowering accrued preferred', () => {
-    // Same 10M, but a 5M distribution at year 2.5 returns capital, so the back half
-    // accrues on a smaller base → less preferred than the no-distribution case.
+  it('credits distributions against outstanding capital first (ROC-first), lowering accrued preferred', () => {
+    // Same 10M, but a 5M distribution at year ~2.5 returns capital (ROC-first — the
+    // round-3 crediting convention), so the back half accrues on a smaller base.
+    // Worked: accrued at 2023-07-01 = 10M × (1.08^2.4956 − 1) = 2,118,847.34; capital
+    // 10M → 5M; tail on (5M + 2,118,847.34) for 2.5024y → total 3,629,319.65.
     const withDist = preferredReturnOutstanding(
       [
         { date: '2021-01-01', amount: 10_000_000 },
@@ -99,8 +101,26 @@ describe('preferredReturnOutstanding — outstanding-capital accrual', () => {
       '2021-01-01',
       '2026-01-01'
     )
-    expect(withDist).toBeGreaterThan(0)
-    expect(withDist).toBeLessThan(4_693_280.76)
+    expect(withDist).toBeCloseTo(3_629_319.65, 1)
+    expect(withDist).toBeLessThan(4_693_280.76) // strictly below the no-distribution case
+  })
+
+  it('pays down accrued preferred only with the excess over unreturned capital', () => {
+    // 3M contributed, then a 5M distribution at year 2: accrued by then is
+    // 3M × (1.08² − 1) = 499,200. ROC-first: the first 3M returns capital, and the
+    // 2M excess extinguishes the accrued balance (floored at 0). Nothing is left to
+    // accrue, so the entitlement at the horizon is zero.
+    const pref = preferredReturnOutstanding(
+      [
+        { date: '2021-01-01', amount: 3_000_000 },
+        { date: '2023-01-01', amount: -5_000_000 },
+      ],
+      0.08,
+      'compound',
+      '2021-01-01',
+      '2026-01-01'
+    )
+    expect(pref).toBe(0)
   })
 
   it('accrues simple interest on unreturned capital only', () => {
